@@ -1,58 +1,63 @@
 import os
 import time
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+import json
+import websocket
 
-API_KEY = os.environ.get('BINANCE_API_KEY')
-API_SECRET = os.environ.get('BINANCE_API_SECRET')
+# Configuración del par
+SYMBOL = 'ongusdt'  # WebSockets de Binance requiere el símbolo en minúsculas
 
-client = Client(API_KEY, API_SECRET)
-
-SYMBOL = 'ONGUSDT'
-QTY = 100               # Cantidad de ONG a operar por orden
-STOP_LOSS_PCT = 0.025   # 2.5% de pérdida máxima fija
-TRAILING_DROP_PCT = 0.02 # Caída del 2% desde el máximo para asegurar ganancia
-
+# Variables de control
 in_position = False
 buy_price = 0.0
 highest_price = 0.0
 
-print("Bot iniciado correctamente con protección de Rate Limit...")
+STOP_LOSS_PCT = 0.025    # 2.5% pérdida máxima
+TRAILING_DROP_PCT = 0.02  # 2.0% caída desde el máximo
 
-while True:
-    try:
-        ticker = client.get_symbol_ticker(symbol=SYMBOL)
-        current_price = float(ticker['price'])
+def on_message(ws, message):
+    global in_position, buy_price, highest_price
 
-        if not in_position:
-            print(f"Precio actual de {SYMBOL}: {current_price}. Buscando punto de compra...")
-        else:
-            if current_price > highest_price:
-                highest_price = current_price
-                print(f"Nuevo máximo alcanzado: {highest_price}")
+    data = json.loads(message)
+    current_price = float(data['c'])  # 'c' es el precio de cierre actual en el stream
 
-            trailing_stop_price = highest_price * (1 - TRAILING_DROP_PCT)
-            hard_stop_price = buy_price * (1 - STOP_LOSS_PCT)
+    if not in_position:
+        print(f"Precio actual de {SYMBOL.upper()}: {current_price}. Esperando señal...")
+    else:
+        if current_price > highest_price:
+            highest_price = current_price
+            print(f"Nuevo máximo: {highest_price}")
 
-            if current_price <= trailing_stop_price and current_price > buy_price:
-                print(f"¡Ejecutando Trailing Stop-Loss! Ganancia asegurada a {current_price}")
-                in_position = False
+        trailing_stop_price = highest_price * (1 - TRAILING_DROP_PCT)
+        hard_stop_price = buy_price * (1 - STOP_LOSS_PCT)
 
-            elif current_price <= hard_stop_price:
-                print(f"¡Ejecutando Stop-Loss Fijo! Protección de capital a {current_price}")
-                in_position = False
+        if current_price <= trailing_stop_price and current_price > buy_price:
+            print(f"¡Ejecutando Trailing Stop-Loss a {current_price}!")
+            in_position = False
 
-        # Pausa de 30 segundos entre consultas para no saturar la API
-        time.sleep(30)
+        elif current_price <= hard_stop_price:
+            print(f"¡Ejecutando Stop-Loss Fijo a {current_price}!")
+            in_position = False
 
-    except BinanceAPIException as e:
-        if e.code == -1003:
-            print("Límite de API alcanzado. Esperando 5 minutos para reintentar...")
-            time.sleep(300)
-        else:
-            print(f"Error de Binance API: {e}")
-            time.sleep(60)
+def on_error(ws, error):
+    print(f"Error en WebSocket: {error}")
 
-    except Exception as e:
-        print(f"Error inesperado: {e}")
-        time.sleep(60)
+def on_close(ws, close_status_code, close_msg):
+    print("Conexión cerrada. Reconectando en 5 segundos...")
+    time.sleep(5)
+    start_websocket()
+
+def start_websocket():
+    # Stream público de ticker individual de Binance (No consume límites de API HTTP)
+    socket_url = f"wss://stream.binance.com:9443/ws/{SYMBOL}@ticker"
+    
+    ws = websocket.WebSocketApp(
+        socket_url,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
+    )
+    ws.run_forever()
+
+if __name__ == "__main__":
+    print("Iniciando Bot con WebSocket Stream (sin consumo de API REST)...")
+    start_websocket()
