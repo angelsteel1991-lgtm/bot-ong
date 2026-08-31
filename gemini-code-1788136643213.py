@@ -6,9 +6,7 @@ from binance.exceptions import BinanceAPIException
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
 
-# Conexión al servidor alternativo de Binance para evitar el bloqueo de IP
 client = Client(API_KEY, API_SECRET)
-client.API_URL = 'https://api1.binance.com/api'
 
 SYMBOL = 'ONGUSDT'
 QTY = 100               # Cantidad de ONG a operar por orden
@@ -19,7 +17,7 @@ in_position = False
 buy_price = 0.0
 highest_price = 0.0
 
-print("Bot iniciado con servidor alternativo api1, protección de Rate Limit y Trailing Stop...")
+print("Bot iniciado correctamente con protección de Rate Limit...")
 
 while True:
     try:
