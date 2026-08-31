@@ -3,6 +3,23 @@ import time
 import ccxt
 import numpy as np
 import pandas as pd
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+# Servidor básico para responder al puerto de Render
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot activo")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# Iniciar servidor en segundo plano
+threading.Thread(target=run_http_server, daemon=True).start()
 
 # Llaves API desde Render
 API_KEY = os.environ.get('BINANCE_API_KEY')
