@@ -25,18 +25,22 @@ LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 BASE_URL = "https://fapi.binance.com"
 
+# 3 USDT de margen por operación
 MARGIN_PER_TRADE_USDT = float(
     os.getenv("MARGIN_PER_TRADE_USDT", "3.0")
 )
 
+# Apalancamiento
 MIN_LEVERAGE = 6
 MAX_LEVERAGE = 7
 
+# Protección
 STOP_LOSS_PCT = 0.025
 TAKE_PROFIT_PCT = 0.045
 TRAILING_DROP_PCT = 0.020
 
-COOLDOWN_SECONDS = 180
+# Más activo: 1 minuto entre operaciones
+COOLDOWN_SECONDS = 60
 
 # ============================================================
 # VARIABLES
@@ -464,7 +468,9 @@ def analyze_market():
     score_long = 0
     score_short = 0
 
-    # Tendencia
+    # --------------------------------------------------------
+    # TENDENCIA
+    # --------------------------------------------------------
 
     if last["ema9"] > last["ema21"]:
         score_long += 2
@@ -472,7 +478,9 @@ def analyze_market():
     if last["ema9"] < last["ema21"]:
         score_short += 2
 
+    # --------------------------------------------------------
     # RSI
+    # --------------------------------------------------------
 
     if 52 <= last["rsi"] <= 68:
         score_long += 2
@@ -480,7 +488,9 @@ def analyze_market():
     if 32 <= last["rsi"] <= 48:
         score_short += 2
 
-    # Volumen
+    # --------------------------------------------------------
+    # VOLUMEN
+    # --------------------------------------------------------
 
     if last["volume"] > last["volume_ma"]:
 
@@ -490,7 +500,9 @@ def analyze_market():
         elif last["close"] < last["open"]:
             score_short += 1
 
-    # Precio
+    # --------------------------------------------------------
+    # PRECIO
+    # --------------------------------------------------------
 
     if last["close"] > last["ema9"]:
         score_long += 1
@@ -507,16 +519,21 @@ def analyze_market():
         f"S={score_short}"
     )
 
+    # --------------------------------------------------------
+    # ENTRADA MÁS ACTIVA
+    # SCORE MÍNIMO: 3
+    # --------------------------------------------------------
+
     if (
-        score_long >= 5
-        and score_long >= score_short + 2
+        score_long >= 3
+        and score_long > score_short
     ):
 
         return "LONG", score_long
 
     if (
-        score_short >= 5
-        and score_short >= score_long + 2
+        score_short >= 3
+        and score_short > score_long
     ):
 
         return "SHORT", score_short
@@ -607,6 +624,7 @@ def open_position(side):
 
     price = get_price()
 
+    # Mantenemos 6x
     leverage = 6
 
     if side == "LONG":
@@ -913,8 +931,10 @@ def on_message(ws, message):
 
         price = float(k["c"])
 
+        # Gestiona la posición en tiempo real
         manage_position(price)
 
+        # Analiza al cerrar cada vela
         if k["x"]:
 
             candle = [
