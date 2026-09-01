@@ -39,19 +39,19 @@ TAKE_PROFIT_PCT = 0.030
 TRAILING_DROP_PCT = 0.012
 
 COOLDOWN_SECONDS = 60
-SIGNAL_GAP = 2
 
-# Cada cuánto se consulta la posición real.
 POSITION_CHECK_SECONDS = 30
+
+# Datos aproximados.
+# Se evita exchangeInfo al arrancar para no generar
+# otra petición que pueda provocar un bloqueo -1003.
+QTY_STEP = 1.0
+MIN_QTY = 1.0
 
 
 # ============================================================
 # VARIABLES
 # ============================================================
-
-qty_step = 1.0
-min_qty = 1.0
-price_tick = 0.00001
 
 last_trade_time = 0
 
@@ -243,91 +243,6 @@ def signed_request(
 
 
 # ============================================================
-# INFORMACIÓN DEL CONTRATO
-# ============================================================
-
-def load_exchange_info():
-
-    global qty_step
-    global min_qty
-    global price_tick
-
-    url = (
-        BASE_URL +
-        "/fapi/v1/exchangeInfo"
-    )
-
-    with rest_lock:
-
-        response = requests.get(
-            url,
-            params={
-                "symbol": SYMBOL
-            },
-            timeout=10
-        )
-
-    if response.status_code != 200:
-
-        raise Exception(
-            "Error exchangeInfo: "
-            + response.text
-        )
-
-    data = response.json()
-
-    symbol_data = None
-
-    for item in data["symbols"]:
-
-        if item["symbol"] == SYMBOL:
-
-            symbol_data = item
-            break
-
-    if symbol_data is None:
-
-        raise Exception(
-            f"{SYMBOL} no está "
-            "disponible en Binance Futures"
-        )
-
-    for f in symbol_data["filters"]:
-
-        if f["filterType"] == "LOT_SIZE":
-
-            qty_step = float(
-                f["stepSize"]
-            )
-
-            min_qty = float(
-                f["minQty"]
-            )
-
-        elif f["filterType"] == "PRICE_FILTER":
-
-            price_tick = float(
-                f["tickSize"]
-            )
-
-    log(
-        f"Contrato encontrado: {SYMBOL}"
-    )
-
-    log(
-        f"Cantidad mínima: {min_qty}"
-    )
-
-    log(
-        f"Paso de cantidad: {qty_step}"
-    )
-
-    log(
-        f"Tick de precio: {price_tick}"
-    )
-
-
-# ============================================================
 # PRECIO
 # ============================================================
 
@@ -386,15 +301,16 @@ def get_usdt_balance():
 # POSICIÓN ACTUAL
 # ============================================================
 
-def get_current_position():
+def get_current_position(force=False):
 
     global cached_position
     global last_position_check
 
     now = time.time()
 
-    # Usa cache para no bombardear Binance.
     if (
+        not force
+        and
         now - last_position_check
         < POSITION_CHECK_SECONDS
     ):
@@ -454,15 +370,6 @@ def get_current_position():
     return result
 
 
-def force_position_refresh():
-
-    global last_position_check
-
-    last_position_check = 0
-
-    return get_current_position()
-
-
 # ============================================================
 # APALANCAMIENTO
 # ============================================================
@@ -483,7 +390,12 @@ def set_leverage():
         f"{LEVERAGE}x"
     )
 
-    return LEVERAGE
+    return int(
+        result.get(
+            "leverage",
+            LEVERAGE
+        )
+    )
 
 
 # ============================================================
@@ -675,7 +587,7 @@ def analyze_market():
     if (
         score_long >= 4
         and
-        score_long >= score_short + SIGNAL_GAP
+        score_long >= score_short + 2
     ):
 
         return (
@@ -686,7 +598,7 @@ def analyze_market():
     if (
         score_short >= 4
         and
-        score_short >= score_long + SIGNAL_GAP
+        score_short >= score_long + 2
     ):
 
         return (
@@ -737,15 +649,16 @@ def calculate_quantity(
 
     quantity = floor_step(
         quantity,
-        qty_step
+        QTY_STEP
     )
 
-    if quantity < min_qty:
+    if quantity < MIN_QTY:
 
         raise Exception(
             f"Cantidad calculada "
             f"{quantity} menor al "
-            f"mínimo {min_qty}"
+            f"mínimo configurado "
+            f"{MIN_QTY}"
         )
 
     log(
@@ -781,7 +694,7 @@ def open_position(side):
         return
 
     current_position, amount, current_entry = (
-        force_position_refresh()
+        get_current_position(force=True)
     )
 
     if current_position is not None:
@@ -795,13 +708,7 @@ def open_position(side):
 
     price = get_price()
 
-    leverage = set_leverage()
-
-    order_side = (
-        "BUY"
-        if side == "LONG"
-        else "SELL"
-    )
+    leverage = LEVERAGE
 
     quantity = calculate_quantity(
         price,
@@ -823,6 +730,16 @@ def open_position(side):
         )
 
         return
+
+    # Solo configuramos leverage cuando realmente
+    # vamos a operar.
+    set_leverage()
+
+    order_side = (
+        "BUY"
+        if side == "LONG"
+        else "SELL"
+    )
 
     result = signed_request(
         "POST",
@@ -856,7 +773,7 @@ def open_position(side):
 
     last_trade_time = now
 
-    force_position_refresh()
+    get_current_position(force=True)
 
 
 # ============================================================
@@ -871,12 +788,13 @@ def close_position(reason):
     global lowest_price
 
     current_position, amount, current_entry = (
-        force_position_refresh()
+        get_current_position(force=True)
     )
 
     if current_position is None:
 
         position_side = None
+        entry_price = 0.0
         return
 
     order_side = (
@@ -923,7 +841,7 @@ def close_position(reason):
     highest_price = 0.0
     lowest_price = 0.0
 
-    force_position_refresh()
+    get_current_position(force=True)
 
 
 # ============================================================
@@ -937,15 +855,11 @@ def manage_position(price):
     global entry_price
     global position_side
 
-    # Si ya conocemos la posición local,
-    # no consultamos Binance en cada tick.
     current_position = position_side
-
     current_entry = entry_price
 
     if current_position is None:
 
-        # Solo sincronizamos ocasionalmente.
         pos, amount, entry = (
             get_current_position()
         )
@@ -1098,12 +1012,10 @@ def on_message(ws, message):
 
         price = float(k["c"])
 
-        manage_position(price)
-
-        # Construimos las velas con WebSocket.
         update_candle_from_websocket(k)
 
-        # Solo analizamos cuando cierra la vela.
+        manage_position(price)
+
         if k["x"]:
 
             if len(candles) < 50:
@@ -1204,48 +1116,59 @@ def main():
         f"{MARGIN_PER_TRADE_USDT} USDT"
     )
 
-    # ========================================================
-    # IMPORTANTE:
-    # Solo una consulta exchangeInfo al arrancar.
-    # ========================================================
-
-    load_exchange_info()
-
-    # ========================================================
-    # NO descargamos klines por REST.
-    # Las velas se construyen desde WebSocket.
-    # ========================================================
+    log(
+        "Modo seguro: NO se consulta "
+        "exchangeInfo al iniciar."
+    )
 
     log(
         "Las velas se cargarán "
         "mediante WebSocket."
     )
 
-    balance = get_usdt_balance()
+    # ========================================================
+    # Solo consultamos balance/posición.
+    # No hacemos exchangeInfo.
+    # ========================================================
 
-    log(
-        f"Balance Futures disponible: "
-        f"{balance:.4f} USDT"
-    )
+    if LIVE_TRADING:
 
-    current_position, amount, entry = (
-        get_current_position()
-    )
-
-    if current_position:
+        balance = get_usdt_balance()
 
         log(
-            f"POSICIÓN EXISTENTE: "
-            f"{current_position} "
-            f"cantidad={amount} "
-            f"entrada={entry}"
+            f"Balance Futures disponible: "
+            f"{balance:.4f} USDT"
         )
 
-        global position_side
-        global entry_price
+        current_position, amount, entry = (
+            get_current_position(force=True)
+        )
 
-        position_side = current_position
-        entry_price = entry
+        if current_position:
+
+            log(
+                f"POSICIÓN EXISTENTE: "
+                f"{current_position} "
+                f"cantidad={amount} "
+                f"entrada={entry}"
+            )
+
+            global position_side
+            global entry_price
+
+            position_side = current_position
+            entry_price = entry
+
+    else:
+
+        log(
+            "MODO PRUEBA ACTIVADO."
+        )
+
+        log(
+            "No se enviarán órdenes "
+            "reales a Binance."
+        )
 
     log(
         "Esperando 50 velas "
@@ -1282,10 +1205,10 @@ def main():
 
         log(
             "Reconectando en "
-            "10 segundos..."
+            "30 segundos..."
         )
 
-        time.sleep(10)
+        time.sleep(30)
 
 
 # ============================================================
