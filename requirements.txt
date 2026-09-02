@@ -1,5 +1,3 @@
-ccxt
 pandas
-python-binance
 websocket-client
 requests
