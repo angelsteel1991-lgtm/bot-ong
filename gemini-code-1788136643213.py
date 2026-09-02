@@ -8,6 +8,7 @@ import pandas as pd
 import websocket
 import json
 import threading
+import uuid
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -37,7 +38,6 @@ TRAILING_DROP_PCT = 0.012
 
 COOLDOWN_SECONDS = 60
 
-# Estrategia MÁS ACTIVA
 MIN_SCORE = 3
 MIN_SCORE_GAP = 1
 
@@ -49,8 +49,12 @@ BASE_URL = "https://fapi.binance.com"
 
 MARKET_WS = "wss://fstream.binance.com/ws/ongusdt@kline_1m"
 
+# WebSocket API actual de Futures USDⓈ-M
+WS_API_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
+
+
 # ============================================================
-# VARIABLES GLOBALES
+# VARIABLES
 # ============================================================
 
 candles = []
@@ -70,13 +74,20 @@ rest_pause_until = 0
 
 state_lock = threading.Lock()
 
+user_stream_control = None
+user_stream_control_lock = threading.Lock()
+
+listen_key = None
+
 
 # ============================================================
 # LOG
 # ============================================================
 
 def log(msg):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
     print(f"[{now}] {msg}", flush=True)
 
 
@@ -96,25 +107,38 @@ def pause_rest(seconds):
     if until > rest_pause_until:
         rest_pause_until = until
 
-    log(f"REST pausado durante {seconds}s")
+    log(
+        f"REST pausado durante "
+        f"{seconds}s"
+    )
 
 
 # ============================================================
-# FIRMA BINANCE
+# REST BINANCE
 # ============================================================
 
 def signed_request(method, endpoint, params=None):
 
     if not API_KEY or not API_SECRET:
-        raise Exception("Faltan BINANCE_API_KEY o BINANCE_API_SECRET")
+        raise Exception(
+            "Faltan BINANCE_API_KEY o "
+            "BINANCE_API_SECRET"
+        )
 
     if not rest_allowed():
-        raise Exception("REST temporalmente pausado")
+        raise Exception(
+            "REST temporalmente pausado"
+        )
 
     if params is None:
         params = {}
 
-    params["timestamp"] = int(time.time() * 1000)
+    params = dict(params)
+
+    params["timestamp"] = int(
+        time.time() * 1000
+    )
+
     params["recvWindow"] = 5000
 
     query = urlencode(params)
@@ -133,36 +157,56 @@ def signed_request(method, endpoint, params=None):
 
     url = BASE_URL + endpoint
 
-    if method == "GET":
-        response = requests.get(
-            url,
-            headers=headers,
-            params=query,
-            timeout=10
+    try:
+
+        if method == "GET":
+
+            response = requests.get(
+                url,
+                headers=headers,
+                params=query,
+                timeout=10
+            )
+
+        elif method == "POST":
+
+            response = requests.post(
+                url,
+                headers=headers,
+                params=query,
+                timeout=10
+            )
+
+        elif method == "DELETE":
+
+            response = requests.delete(
+                url,
+                headers=headers,
+                params=query,
+                timeout=10
+            )
+
+        else:
+
+            raise Exception(
+                "Método HTTP no soportado"
+            )
+
+    except requests.RequestException as e:
+
+        raise Exception(
+            f"Error de conexión REST: {e}"
         )
 
-    elif method == "POST":
-        response = requests.post(
-            url,
-            headers=headers,
-            params=query,
-            timeout=10
-        )
-
-    elif method == "DELETE":
-        response = requests.delete(
-            url,
-            headers=headers,
-            params=query,
-            timeout=10
-        )
-
-    else:
-        raise Exception("Método HTTP no soportado")
+    # ========================================================
+    # RATE LIMIT
+    # ========================================================
 
     if response.status_code in (418, 429):
 
-        retry_after = response.headers.get("Retry-After")
+        retry_after = response.headers.get(
+            "Retry-After"
+        )
 
         try:
             wait = int(retry_after)
@@ -171,19 +215,22 @@ def signed_request(method, endpoint, params=None):
 
         log(
             f"BINANCE {response.status_code}. "
-            f"No se vuelve a insistir. Esperando {wait}s."
+            f"NO se vuelve a insistir. "
+            f"Esperando {wait}s."
         )
 
         pause_rest(wait)
 
         raise Exception(
-            f"Binance rate limit {response.status_code}"
+            f"Binance rate limit "
+            f"{response.status_code}"
         )
 
     if response.status_code >= 400:
 
         raise Exception(
-            f"Binance HTTP {response.status_code}: "
+            f"Binance HTTP "
+            f"{response.status_code}: "
             f"{response.text}"
         )
 
@@ -192,7 +239,6 @@ def signed_request(method, endpoint, params=None):
 
 # ============================================================
 # BALANCE
-# SOLO SE USA CUANDO REALMENTE VAMOS A ABRIR
 # ============================================================
 
 def get_usdt_balance():
@@ -206,14 +252,15 @@ def get_usdt_balance():
 
         if item["asset"] == "USDT":
 
-            return float(item["availableBalance"])
+            return float(
+                item["availableBalance"]
+            )
 
     return 0.0
 
 
 # ============================================================
 # LEVERAGE
-# SOLO UNA VEZ
 # ============================================================
 
 def set_leverage():
@@ -238,15 +285,15 @@ def set_leverage():
 
     except Exception as e:
 
-        log(f"No se pudo configurar leverage: {e}")
+        log(
+            f"No se pudo configurar leverage: {e}"
+        )
 
         return False
 
 
 # ============================================================
 # CANTIDAD
-#
-# ONGUSDT se trabaja con cantidad entera en esta versión.
 # ============================================================
 
 QTY_STEP = 1.0
@@ -258,7 +305,10 @@ def calculate_quantity(price):
     balance = get_usdt_balance()
 
     if balance <= 0:
-        raise Exception("No hay balance USDT disponible")
+
+        raise Exception(
+            "No hay balance USDT disponible"
+        )
 
     margin = min(
         MARGIN_PER_TRADE_USDT,
@@ -274,13 +324,12 @@ def calculate_quantity(price):
     ) * QTY_STEP
 
     if quantity < MIN_QTY:
+
         quantity = MIN_QTY
 
-    quantity = float(
+    return float(
         f"{quantity:.8f}"
     )
-
-    return quantity
 
 
 # ============================================================
@@ -290,17 +339,18 @@ def calculate_quantity(price):
 def open_position(side):
 
     global last_trade_time
-
     global position_side
     global position_qty
     global entry_price
-
     global highest_price
     global lowest_price
 
     now = time.time()
 
-    if now - last_trade_time < COOLDOWN_SECONDS:
+    if (
+        now - last_trade_time
+        < COOLDOWN_SECONDS
+    ):
 
         log("Cooldown activo")
         return
@@ -339,7 +389,9 @@ def open_position(side):
 
     try:
 
-        quantity = calculate_quantity(price)
+        quantity = calculate_quantity(
+            price
+        )
 
         order_side = (
             "BUY"
@@ -364,8 +416,6 @@ def open_position(side):
             f"qty={quantity}"
         )
 
-        # El precio real de entrada será actualizado
-        # por ACCOUNT_UPDATE / ORDER_TRADE_UPDATE.
         with state_lock:
 
             position_side = side
@@ -379,7 +429,9 @@ def open_position(side):
 
     except Exception as e:
 
-        log(f"ERROR ABRIENDO POSICIÓN: {e}")
+        log(
+            f"ERROR ABRIENDO POSICIÓN: {e}"
+        )
 
 
 # ============================================================
@@ -391,10 +443,8 @@ def close_position(reason="signal"):
     global position_side
     global position_qty
     global entry_price
-
     global highest_price
     global lowest_price
-
     global last_trade_time
 
     with state_lock:
@@ -403,7 +453,6 @@ def close_position(reason="signal"):
         qty = position_qty
 
     if side is None or qty <= 0:
-
         return
 
     log(
@@ -428,7 +477,7 @@ def close_position(reason="signal"):
             else "BUY"
         )
 
-        result = signed_request(
+        signed_request(
             "POST",
             "/fapi/v1/order",
             {
@@ -455,7 +504,9 @@ def close_position(reason="signal"):
 
     except Exception as e:
 
-        log(f"ERROR CERRANDO POSICIÓN: {e}")
+        log(
+            f"ERROR CERRANDO POSICIÓN: {e}"
+        )
 
 
 # ============================================================
@@ -471,13 +522,19 @@ def calculate_signal(df):
 
     df["ema9"] = (
         df["close"]
-        .ewm(span=9, adjust=False)
+        .ewm(
+            span=9,
+            adjust=False
+        )
         .mean()
     )
 
     df["ema21"] = (
         df["close"]
-        .ewm(span=21, adjust=False)
+        .ewm(
+            span=21,
+            adjust=False
+        )
         .mean()
     )
 
@@ -487,15 +544,9 @@ def calculate_signal(df):
 
     loss = -delta.clip(upper=0)
 
-    avg_gain = (
-        gain.rolling(14)
-        .mean()
-    )
+    avg_gain = gain.rolling(14).mean()
 
-    avg_loss = (
-        loss.rolling(14)
-        .mean()
-    )
+    avg_loss = loss.rolling(14).mean()
 
     rs = avg_gain / avg_loss.replace(
         0,
@@ -513,19 +564,13 @@ def calculate_signal(df):
     )
 
     last = df.iloc[-1]
-
     previous = df.iloc[-2]
 
     close = float(last["close"])
-
     ema9 = float(last["ema9"])
-
     ema21 = float(last["ema21"])
-
     rsi = float(last["rsi"])
-
     volume = float(last["volume"])
-
     volume_ma = float(last["volume_ma"])
 
     open_price = float(last["open"])
@@ -535,10 +580,6 @@ def calculate_signal(df):
     previous_close = float(
         previous["close"]
     )
-
-    # ========================================================
-    # LONG
-    # ========================================================
 
     long_score = 0
 
@@ -559,10 +600,6 @@ def calculate_signal(df):
 
     if close > previous_close:
         long_score += 1
-
-    # ========================================================
-    # SHORT
-    # ========================================================
 
     short_score = 0
 
@@ -594,20 +631,20 @@ def calculate_signal(df):
         f"SHORT={short_score}"
     )
 
-    # ========================================================
-    # ENTRADA MÁS ACTIVA
-    # ========================================================
-
     if (
         long_score >= MIN_SCORE
-        and long_score - short_score >= MIN_SCORE_GAP
+        and
+        long_score - short_score
+        >= MIN_SCORE_GAP
     ):
 
         return "LONG"
 
     if (
         short_score >= MIN_SCORE
-        and short_score - long_score >= MIN_SCORE_GAP
+        and
+        short_score - long_score
+        >= MIN_SCORE_GAP
     ):
 
         return "SHORT"
@@ -616,7 +653,7 @@ def calculate_signal(df):
 
 
 # ============================================================
-# PROCESAR VELA CERRADA
+# PROCESAR VELA
 # ============================================================
 
 def process_candle():
@@ -636,25 +673,17 @@ def process_candle():
         ]
     )
 
-    df["open"] = pd.to_numeric(
-        df["open"]
-    )
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]:
 
-    df["high"] = pd.to_numeric(
-        df["high"]
-    )
-
-    df["low"] = pd.to_numeric(
-        df["low"]
-    )
-
-    df["close"] = pd.to_numeric(
-        df["close"]
-    )
-
-    df["volume"] = pd.to_numeric(
-        df["volume"]
-    )
+        df[col] = pd.to_numeric(
+            df[col]
+        )
 
     signal = calculate_signal(df)
 
@@ -665,21 +694,16 @@ def process_candle():
 
         current_side = position_side
 
-    # ========================================================
-    # SIN POSICIÓN
-    # ========================================================
-
     if current_side is None:
 
         open_position(signal)
 
         return
 
-    # ========================================================
-    # CAMBIO DE DIRECCIÓN
-    # ========================================================
-
-    if current_side == "LONG" and signal == "SHORT":
+    if (
+        current_side == "LONG"
+        and signal == "SHORT"
+    ):
 
         close_position(
             "señal contraria"
@@ -689,7 +713,10 @@ def process_candle():
 
         open_position("SHORT")
 
-    elif current_side == "SHORT" and signal == "LONG":
+    elif (
+        current_side == "SHORT"
+        and signal == "LONG"
+    ):
 
         close_position(
             "señal contraria"
@@ -701,7 +728,7 @@ def process_candle():
 
 
 # ============================================================
-# MANEJAR POSICIÓN
+# CONTROL DE POSICIÓN
 # ============================================================
 
 def manage_position():
@@ -722,13 +749,10 @@ def manage_position():
     if price is None:
         return
 
-    # ========================================================
-    # LONG
-    # ========================================================
-
     if side == "LONG":
 
         if highest_price == 0:
+
             highest_price = price
 
         highest_price = max(
@@ -765,20 +789,18 @@ def manage_position():
 
         elif (
             highest_price > entry
-            and price <= trailing_price
+            and
+            price <= trailing_price
         ):
 
             close_position(
                 "TRAILING STOP"
             )
 
-    # ========================================================
-    # SHORT
-    # ========================================================
-
     elif side == "SHORT":
 
         if lowest_price == 0:
+
             lowest_price = price
 
         lowest_price = min(
@@ -815,7 +837,8 @@ def manage_position():
 
         elif (
             lowest_price < entry
-            and price >= trailing_price
+            and
+            price >= trailing_price
         ):
 
             close_position(
@@ -824,7 +847,7 @@ def manage_position():
 
 
 # ============================================================
-# WEBSOCKET DE MERCADO
+# MARKET WEBSOCKET
 # ============================================================
 
 def on_market_message(ws, message):
@@ -840,15 +863,9 @@ def on_market_message(ws, message):
         if not kline:
             return
 
-        close_price = float(
+        current_price = float(
             kline["c"]
         )
-
-        current_price = close_price
-
-        # ====================================================
-        # SOLO VELA CERRADA
-        # ====================================================
 
         if kline["x"]:
 
@@ -884,7 +901,7 @@ def on_market_message(ws, message):
     except Exception as e:
 
         log(
-            f"Error procesando market WS: {e}"
+            f"Error market WS: {e}"
         )
 
 
@@ -895,11 +912,11 @@ def on_market_error(ws, error):
     )
 
 
-def on_market_close(ws, close_status_code, close_msg):
+def on_market_close(ws, code, msg):
 
     log(
         f"Market WS cerrado: "
-        f"{close_status_code} {close_msg}"
+        f"{code} {msg}"
     )
 
 
@@ -940,116 +957,200 @@ def market_websocket_loop():
             )
 
         log(
-            "Reconexión Market WS en 60 segundos..."
+            "Reconexión Market WS "
+            "en 60 segundos..."
         )
 
         time.sleep(60)
 
 
 # ============================================================
-# USER DATA STREAM
+# USER DATA STREAM POR WS API
+#
+# Binance actualmente permite:
+#
+# userDataStream.start
+# userDataStream.ping
+#
+# directamente en:
+#
+# wss://ws-fapi.binance.com/ws-fapi/v1
 # ============================================================
 
-def create_listen_key():
+def start_user_data_stream():
 
-    if not rest_allowed():
+    global user_stream_control
+    global listen_key
 
-        raise Exception(
-            "REST pausado"
-        )
-
-    headers = {
-        "X-MBX-APIKEY": API_KEY
-    }
-
-    response = requests.post(
-        BASE_URL + "/fapi/v1/listenKey",
-        headers=headers,
-        timeout=10
+    log(
+        "Abriendo conexión WS API "
+        "para User Data Stream..."
     )
 
-    if response.status_code in (418, 429):
+    ws = websocket.create_connection(
+        WS_API_URL,
+        timeout=15
+    )
 
-        retry_after = response.headers.get(
-            "Retry-After"
-        )
+    request_id = str(uuid.uuid4())
 
-        try:
-            wait = int(retry_after)
-        except:
-            wait = 120
-
-        pause_rest(wait)
-
-        raise Exception(
-            f"User stream rate limit "
-            f"{response.status_code}"
-        )
-
-    if response.status_code >= 400:
-
-        raise Exception(
-            response.text
-        )
-
-    return response.json()["listenKey"]
-
-
-def keepalive_listen_key(listen_key):
-
-    if not rest_allowed():
-        return
-
-    headers = {
-        "X-MBX-APIKEY": API_KEY
+    request = {
+        "id": request_id,
+        "method": "userDataStream.start",
+        "params": {
+            "apiKey": API_KEY
+        }
     }
 
-    try:
+    ws.send(
+        json.dumps(request)
+    )
 
-        response = requests.put(
-            BASE_URL + "/fapi/v1/listenKey",
-            headers=headers,
-            timeout=10
+    response = json.loads(
+        ws.recv()
+    )
+
+    if response.get("status") != 200:
+
+        ws.close()
+
+        raise Exception(
+            f"UserDataStream.start "
+            f"rechazado: {response}"
         )
 
-        if response.status_code in (418, 429):
+    listen_key = (
+        response
+        .get("result", {})
+        .get("listenKey")
+    )
 
-            retry_after = response.headers.get(
-                "Retry-After"
-            )
+    if not listen_key:
 
-            try:
-                wait = int(retry_after)
-            except:
-                wait = 120
+        ws.close()
 
-            pause_rest(wait)
-
-            log(
-                f"User stream keepalive: "
-                f"Binance {response.status_code}"
-            )
-
-    except Exception as e:
-
-        log(
-            f"Keepalive error: {e}"
+        raise Exception(
+            "Binance no devolvió listenKey"
         )
 
+    with user_stream_control_lock:
 
-def user_stream_keepalive_loop(listen_key):
+        user_stream_control = ws
+
+    log(
+        "USER DATA STREAM CREADO "
+        "POR WS API"
+    )
+
+    log(
+        "ListenKey recibido correctamente"
+    )
+
+    return listen_key
+
+
+# ============================================================
+# KEEPALIVE WS API
+# ============================================================
+
+def user_stream_keepalive_loop():
+
+    global user_stream_control
+
+    # Binance recomienda ping aproximadamente
+    # cada 60 minutos.
+    # Lo hacemos cada 45 minutos para tener margen.
 
     while True:
 
-        time.sleep(45 * 60)
-
-        keepalive_listen_key(
-            listen_key
+        time.sleep(
+            45 * 60
         )
+
+        try:
+
+            with user_stream_control_lock:
+
+                ws = user_stream_control
+
+            if ws is None:
+
+                log(
+                    "Keepalive: no hay "
+                    "conexión WS API"
+                )
+
+                continue
+
+            request_id = str(
+                uuid.uuid4()
+            )
+
+            request = {
+                "id": request_id,
+                "method": "userDataStream.ping",
+                "params": {
+                    "apiKey": API_KEY
+                }
+            }
+
+            with user_stream_control_lock:
+
+                ws.send(
+                    json.dumps(request)
+                )
+
+                ws.settimeout(15)
+
+                response = json.loads(
+                    ws.recv()
+                )
+
+            if response.get("status") == 200:
+
+                new_key = (
+                    response
+                    .get("result", {})
+                    .get("listenKey")
+                )
+
+                if new_key:
+
+                    listen_key = new_key
+
+                log(
+                    "USER DATA STREAM "
+                    "KEEPALIVE OK"
+                )
+
+            else:
+
+                log(
+                    f"USER DATA KEEPALIVE "
+                    f"RESPUESTA: {response}"
+                )
+
+        except Exception as e:
+
+            log(
+                f"User Data keepalive error: {e}"
+            )
+
+            with user_stream_control_lock:
+
+                try:
+
+                    if user_stream_control:
+                        user_stream_control.close()
+
+                except:
+                    pass
+
+                user_stream_control = None
 
 
 # ============================================================
-# USER DATA EVENTS
+# PROCESAR ACCOUNT UPDATE
 # ============================================================
 
 def process_account_update(data):
@@ -1057,8 +1158,13 @@ def process_account_update(data):
     global position_side
     global position_qty
     global entry_price
+    global highest_price
+    global lowest_price
 
-    account = data.get("a", {})
+    account = data.get(
+        "a",
+        {}
+    )
 
     positions = account.get(
         "P",
@@ -1078,52 +1184,75 @@ def process_account_update(data):
             p.get("ep", 0)
         )
 
-        if amt > 0:
+        with state_lock:
 
-            position_side = "LONG"
-            position_qty = amt
-            entry_price = entry
+            if amt > 0:
 
-            log(
-                f"ACCOUNT UPDATE -> "
-                f"LONG qty={amt} "
-                f"entry={entry}"
-            )
+                position_side = "LONG"
+                position_qty = amt
+                entry_price = entry
 
-        elif amt < 0:
+                if highest_price == 0:
 
-            position_side = "SHORT"
-            position_qty = abs(amt)
-            entry_price = entry
+                    highest_price = entry
 
-            log(
-                f"ACCOUNT UPDATE -> "
-                f"SHORT qty={abs(amt)} "
-                f"entry={entry}"
-            )
+                if lowest_price == 0:
 
-        else:
+                    lowest_price = entry
 
-            position_side = None
-            position_qty = 0.0
-            entry_price = 0.0
+                log(
+                    f"ACCOUNT UPDATE -> "
+                    f"LONG qty={amt} "
+                    f"entry={entry}"
+                )
 
-            highest_price = 0.0
-            lowest_price = 0.0
+            elif amt < 0:
 
-            log(
-                "ACCOUNT UPDATE -> "
-                "posición cerrada"
-            )
+                position_side = "SHORT"
+                position_qty = abs(amt)
+                entry_price = entry
 
+                if highest_price == 0:
+
+                    highest_price = entry
+
+                if lowest_price == 0:
+
+                    lowest_price = entry
+
+                log(
+                    f"ACCOUNT UPDATE -> "
+                    f"SHORT qty={abs(amt)} "
+                    f"entry={entry}"
+                )
+
+            else:
+
+                position_side = None
+                position_qty = 0.0
+                entry_price = 0.0
+
+                highest_price = 0.0
+                lowest_price = 0.0
+
+                log(
+                    "ACCOUNT UPDATE -> "
+                    "posición cerrada"
+                )
+
+
+# ============================================================
+# ORDER UPDATE
+# ============================================================
 
 def process_order_update(data):
 
-    order = data.get("o", {})
+    order = data.get(
+        "o",
+        {}
+    )
 
-    symbol = order.get("s")
-
-    if symbol != SYMBOL:
+    if order.get("s") != SYMBOL:
         return
 
     status = order.get("X")
@@ -1149,6 +1278,10 @@ def process_order_update(data):
             f"avg={avg_price}"
         )
 
+
+# ============================================================
+# USER DATA MESSAGE
+# ============================================================
 
 def on_user_message(ws, message):
 
@@ -1193,7 +1326,8 @@ def on_user_error(ws, error):
 def on_user_close(ws, code, msg):
 
     log(
-        f"User WS cerrado: {code} {msg}"
+        f"User WS cerrado: "
+        f"{code} {msg}"
     )
 
 
@@ -1204,26 +1338,33 @@ def on_user_open(ws):
     )
 
 
+# ============================================================
+# USER WEBSOCKET LOOP
+# ============================================================
+
 def user_websocket_loop():
+
+    global listen_key
+    global user_stream_control
 
     while True:
 
-        listen_key = None
+        stream_ws = None
 
         try:
 
-            log(
-                "Creando User Data Stream..."
-            )
-
-            listen_key = create_listen_key()
+            listen_key = start_user_data_stream()
 
             ws_url = (
                 "wss://fstream.binance.com/ws/"
                 + listen_key
             )
 
-            ws = websocket.WebSocketApp(
+            log(
+                "Conectando User Data WebSocket..."
+            )
+
+            stream_ws = websocket.WebSocketApp(
                 ws_url,
                 on_open=on_user_open,
                 on_message=on_user_message,
@@ -1231,7 +1372,7 @@ def user_websocket_loop():
                 on_close=on_user_close
             )
 
-            ws.run_forever(
+            stream_ws.run_forever(
                 ping_interval=60,
                 ping_timeout=20
             )
@@ -1242,15 +1383,40 @@ def user_websocket_loop():
                 f"User WS exception: {e}"
             )
 
+        finally:
+
+            try:
+
+                if stream_ws:
+
+                    stream_ws.close()
+
+            except:
+                pass
+
+        with user_stream_control_lock:
+
+            try:
+
+                if user_stream_control:
+
+                    user_stream_control.close()
+
+            except:
+                pass
+
+            user_stream_control = None
+
         log(
-            "Reconexión User WS en 60 segundos..."
+            "Reconexión User Data "
+            "en 60 segundos..."
         )
 
         time.sleep(60)
 
 
 # ============================================================
-# HILO PARA CONTROLAR POSICIÓN
+# POSITION MANAGER
 # ============================================================
 
 def position_manager_loop():
@@ -1271,7 +1437,7 @@ def position_manager_loop():
 
 
 # ============================================================
-# HEALTH CHECK RENDER
+# HEALTH SERVER
 # ============================================================
 
 class HealthHandler(
@@ -1298,6 +1464,7 @@ class HealthHandler(
         format,
         *args
     ):
+
         return
 
 
@@ -1391,7 +1558,7 @@ def main():
     ).start()
 
     # ========================================================
-    # MARKET WEBSOCKET
+    # MARKET WS
     # ========================================================
 
     threading.Thread(
@@ -1400,11 +1567,20 @@ def main():
     ).start()
 
     # ========================================================
-    # USER DATA WEBSOCKET
+    # USER DATA WS
     # ========================================================
 
     threading.Thread(
         target=user_websocket_loop,
+        daemon=True
+    ).start()
+
+    # ========================================================
+    # KEEPALIVE USER DATA
+    # ========================================================
+
+    threading.Thread(
+        target=user_stream_keepalive_loop,
         daemon=True
     ).start()
 
