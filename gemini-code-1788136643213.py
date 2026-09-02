@@ -22,16 +22,13 @@ SYMBOL = "ONGUSDT"
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-LIVE_TRADING = (
-    os.getenv("LIVE_TRADING", "false").lower() == "true"
-)
+# ============================================================
+# TRADING
+# ============================================================
 
-BASE_URL = "https://fapi.binance.com"
+LIVE_TRADING = True
 
-MARGIN_PER_TRADE_USDT = float(
-    os.getenv("MARGIN_PER_TRADE_USDT", "2.5")
-)
-
+MARGIN_PER_TRADE_USDT = 2.5
 LEVERAGE = 6
 
 STOP_LOSS_PCT = 0.020
@@ -40,155 +37,95 @@ TRAILING_DROP_PCT = 0.012
 
 COOLDOWN_SECONDS = 60
 
-POSITION_CHECK_SECONDS = 30
-
-# Datos aproximados.
-# Se evita exchangeInfo al arrancar para no generar
-# otra petición que pueda provocar un bloqueo -1003.
-QTY_STEP = 1.0
-MIN_QTY = 1.0
-
+# Estrategia MÁS ACTIVA
+MIN_SCORE = 3
+MIN_SCORE_GAP = 1
 
 # ============================================================
-# VARIABLES
+# BINANCE
 # ============================================================
 
-last_trade_time = 0
+BASE_URL = "https://fapi.binance.com"
+
+MARKET_WS = "wss://fstream.binance.com/ws/ongusdt@kline_1m"
+
+# ============================================================
+# VARIABLES GLOBALES
+# ============================================================
+
+candles = []
+
+current_price = None
 
 position_side = None
+position_qty = 0.0
 entry_price = 0.0
 
 highest_price = 0.0
 lowest_price = 0.0
 
-candles = []
+last_trade_time = 0
 
-last_position_check = 0
-cached_position = (None, 0.0, 0.0)
+rest_pause_until = 0
 
-rest_lock = threading.Lock()
-
-
-# ============================================================
-# SERVIDOR HTTP PARA RENDER
-# ============================================================
-
-class HealthHandler(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-
-        self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/plain"
-        )
-
-        self.end_headers()
-
-        self.wfile.write(
-            b"BOT ONGUSDT OK"
-        )
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_http_server():
-
-    port = int(
-        os.getenv("PORT", "10000")
-    )
-
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
-
-    log(
-        f"Servidor HTTP iniciado "
-        f"en puerto {port}"
-    )
-
-    server.serve_forever()
+state_lock = threading.Lock()
 
 
 # ============================================================
-# UTILIDADES
+# LOG
 # ============================================================
 
-def log(message):
-
-    now = datetime.now(
-        timezone.utc
-    ).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-
-    print(
-        f"[{now}] {message}",
-        flush=True
-    )
-
-
-def floor_step(value, step):
-
-    if step <= 0:
-        return value
-
-    return math.floor(
-        value / step
-    ) * step
-
-
-def format_number(value, decimals=8):
-
-    return (
-        f"{value:.{decimals}f}"
-        .rstrip("0")
-        .rstrip(".")
-    )
+def log(msg):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {msg}", flush=True)
 
 
 # ============================================================
-# REQUEST BINANCE FIRMADO
+# REST CONTROL
 # ============================================================
 
-def signed_request(
-    method,
-    endpoint,
-    params=None
-):
+def rest_allowed():
+    return time.time() >= rest_pause_until
+
+
+def pause_rest(seconds):
+    global rest_pause_until
+
+    until = time.time() + seconds
+
+    if until > rest_pause_until:
+        rest_pause_until = until
+
+    log(f"REST pausado durante {seconds}s")
+
+
+# ============================================================
+# FIRMA BINANCE
+# ============================================================
+
+def signed_request(method, endpoint, params=None):
 
     if not API_KEY or not API_SECRET:
+        raise Exception("Faltan BINANCE_API_KEY o BINANCE_API_SECRET")
 
-        raise Exception(
-            "Faltan BINANCE_API_KEY "
-            "o BINANCE_API_SECRET"
-        )
+    if not rest_allowed():
+        raise Exception("REST temporalmente pausado")
 
     if params is None:
         params = {}
 
-    params = dict(params)
-
-    params["timestamp"] = int(
-        time.time() * 1000
-    )
-
+    params["timestamp"] = int(time.time() * 1000)
     params["recvWindow"] = 5000
 
-    query_string = urlencode(
-        params
-    )
+    query = urlencode(params)
 
     signature = hmac.new(
-        API_SECRET.encode("utf-8"),
-        query_string.encode("utf-8"),
+        API_SECRET.encode(),
+        query.encode(),
         hashlib.sha256
     ).hexdigest()
 
-    params["signature"] = signature
+    query += "&signature=" + signature
 
     headers = {
         "X-MBX-APIKEY": API_KEY
@@ -196,46 +133,57 @@ def signed_request(
 
     url = BASE_URL + endpoint
 
-    with rest_lock:
+    if method == "GET":
+        response = requests.get(
+            url,
+            headers=headers,
+            params=query,
+            timeout=10
+        )
 
-        if method == "GET":
+    elif method == "POST":
+        response = requests.post(
+            url,
+            headers=headers,
+            params=query,
+            timeout=10
+        )
 
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=10
-            )
+    elif method == "DELETE":
+        response = requests.delete(
+            url,
+            headers=headers,
+            params=query,
+            timeout=10
+        )
 
-        elif method == "POST":
+    else:
+        raise Exception("Método HTTP no soportado")
 
-            response = requests.post(
-                url,
-                params=params,
-                headers=headers,
-                timeout=10
-            )
+    if response.status_code in (418, 429):
 
-        elif method == "DELETE":
+        retry_after = response.headers.get("Retry-After")
 
-            response = requests.delete(
-                url,
-                params=params,
-                headers=headers,
-                timeout=10
-            )
+        try:
+            wait = int(retry_after)
+        except:
+            wait = 120
 
-        else:
+        log(
+            f"BINANCE {response.status_code}. "
+            f"No se vuelve a insistir. Esperando {wait}s."
+        )
 
-            raise Exception(
-                "Método HTTP no soportado"
-            )
-
-    if response.status_code != 200:
+        pause_rest(wait)
 
         raise Exception(
-            f"Binance HTTP "
-            f"{response.status_code}: "
+            f"Binance rate limit {response.status_code}"
+        )
+
+    if response.status_code >= 400:
+
+        raise Exception(
+            f"Binance HTTP {response.status_code}: "
             f"{response.text}"
         )
 
@@ -243,40 +191,8 @@ def signed_request(
 
 
 # ============================================================
-# PRECIO
-# ============================================================
-
-def get_price():
-
-    url = (
-        BASE_URL +
-        "/fapi/v1/ticker/price"
-    )
-
-    with rest_lock:
-
-        response = requests.get(
-            url,
-            params={
-                "symbol": SYMBOL
-            },
-            timeout=10
-        )
-
-    if response.status_code != 200:
-
-        raise Exception(
-            "Error obteniendo precio: "
-            + response.text
-        )
-
-    return float(
-        response.json()["price"]
-    )
-
-
-# ============================================================
-# BALANCE FUTURES
+# BALANCE
+# SOLO SE USA CUANDO REALMENTE VAMOS A ABRIR
 # ============================================================
 
 def get_usdt_balance():
@@ -286,178 +202,308 @@ def get_usdt_balance():
         "/fapi/v2/balance"
     )
 
-    for asset in data:
+    for item in data:
 
-        if asset["asset"] == "USDT":
+        if item["asset"] == "USDT":
 
-            return float(
-                asset["availableBalance"]
-            )
+            return float(item["availableBalance"])
 
     return 0.0
 
 
 # ============================================================
-# POSICIÓN ACTUAL
-# ============================================================
-
-def get_current_position(force=False):
-
-    global cached_position
-    global last_position_check
-
-    now = time.time()
-
-    if (
-        not force
-        and
-        now - last_position_check
-        < POSITION_CHECK_SECONDS
-    ):
-
-        return cached_position
-
-    data = signed_request(
-        "GET",
-        "/fapi/v3/positionRisk",
-        {
-            "symbol": SYMBOL
-        }
-    )
-
-    result = (
-        None,
-        0.0,
-        0.0
-    )
-
-    for p in data:
-
-        if p["symbol"] != SYMBOL:
-            continue
-
-        amount = float(
-            p["positionAmt"]
-        )
-
-        if amount > 0:
-
-            result = (
-                "LONG",
-                amount,
-                float(
-                    p["entryPrice"]
-                )
-            )
-
-            break
-
-        if amount < 0:
-
-            result = (
-                "SHORT",
-                abs(amount),
-                float(
-                    p["entryPrice"]
-                )
-            )
-
-            break
-
-    cached_position = result
-    last_position_check = now
-
-    return result
-
-
-# ============================================================
-# APALANCAMIENTO
+# LEVERAGE
+# SOLO UNA VEZ
 # ============================================================
 
 def set_leverage():
 
-    result = signed_request(
-        "POST",
-        "/fapi/v1/leverage",
-        {
-            "symbol": SYMBOL,
-            "leverage": LEVERAGE
-        }
+    try:
+
+        result = signed_request(
+            "POST",
+            "/fapi/v1/leverage",
+            {
+                "symbol": SYMBOL,
+                "leverage": LEVERAGE
+            }
+        )
+
+        log(
+            f"Leverage configurado: "
+            f"{result.get('leverage', LEVERAGE)}x"
+        )
+
+        return True
+
+    except Exception as e:
+
+        log(f"No se pudo configurar leverage: {e}")
+
+        return False
+
+
+# ============================================================
+# CANTIDAD
+#
+# ONGUSDT se trabaja con cantidad entera en esta versión.
+# ============================================================
+
+QTY_STEP = 1.0
+MIN_QTY = 1.0
+
+
+def calculate_quantity(price):
+
+    balance = get_usdt_balance()
+
+    if balance <= 0:
+        raise Exception("No hay balance USDT disponible")
+
+    margin = min(
+        MARGIN_PER_TRADE_USDT,
+        balance
     )
+
+    notional = margin * LEVERAGE
+
+    quantity = notional / price
+
+    quantity = math.floor(
+        quantity / QTY_STEP
+    ) * QTY_STEP
+
+    if quantity < MIN_QTY:
+        quantity = MIN_QTY
+
+    quantity = float(
+        f"{quantity:.8f}"
+    )
+
+    return quantity
+
+
+# ============================================================
+# ABRIR POSICIÓN
+# ============================================================
+
+def open_position(side):
+
+    global last_trade_time
+
+    global position_side
+    global position_qty
+    global entry_price
+
+    global highest_price
+    global lowest_price
+
+    now = time.time()
+
+    if now - last_trade_time < COOLDOWN_SECONDS:
+
+        log("Cooldown activo")
+        return
+
+    with state_lock:
+
+        if position_side is not None:
+
+            log(
+                f"Ya existe posición "
+                f"{position_side}"
+            )
+
+            return
+
+    if current_price is None:
+
+        log("Sin precio todavía")
+        return
+
+    price = current_price
 
     log(
-        f"Apalancamiento configurado: "
-        f"{LEVERAGE}x"
+        f"SEÑAL {side} | "
+        f"Precio={price:.6f}"
     )
 
-    return int(
-        result.get(
-            "leverage",
-            LEVERAGE
+    if not LIVE_TRADING:
+
+        log(
+            "LIVE_TRADING=False -> "
+            "no se ejecuta orden"
         )
+
+        return
+
+    try:
+
+        quantity = calculate_quantity(price)
+
+        order_side = (
+            "BUY"
+            if side == "LONG"
+            else "SELL"
+        )
+
+        result = signed_request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": SYMBOL,
+                "side": order_side,
+                "type": "MARKET",
+                "quantity": quantity
+            }
+        )
+
+        log(
+            f"ORDEN EJECUTADA: "
+            f"{side} "
+            f"qty={quantity}"
+        )
+
+        # El precio real de entrada será actualizado
+        # por ACCOUNT_UPDATE / ORDER_TRADE_UPDATE.
+        with state_lock:
+
+            position_side = side
+            position_qty = quantity
+            entry_price = price
+
+            highest_price = price
+            lowest_price = price
+
+        last_trade_time = time.time()
+
+    except Exception as e:
+
+        log(f"ERROR ABRIENDO POSICIÓN: {e}")
+
+
+# ============================================================
+# CERRAR POSICIÓN
+# ============================================================
+
+def close_position(reason="signal"):
+
+    global position_side
+    global position_qty
+    global entry_price
+
+    global highest_price
+    global lowest_price
+
+    global last_trade_time
+
+    with state_lock:
+
+        side = position_side
+        qty = position_qty
+
+    if side is None or qty <= 0:
+
+        return
+
+    log(
+        f"CERRANDO {side} | "
+        f"Motivo: {reason}"
     )
+
+    if not LIVE_TRADING:
+
+        log(
+            "LIVE_TRADING=False -> "
+            "no se ejecuta cierre"
+        )
+
+        return
+
+    try:
+
+        close_side = (
+            "SELL"
+            if side == "LONG"
+            else "BUY"
+        )
+
+        result = signed_request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": SYMBOL,
+                "side": close_side,
+                "type": "MARKET",
+                "quantity": qty,
+                "reduceOnly": "true"
+            }
+        )
+
+        log("POSICIÓN CERRADA")
+
+        with state_lock:
+
+            position_side = None
+            position_qty = 0.0
+            entry_price = 0.0
+
+            highest_price = 0.0
+            lowest_price = 0.0
+
+        last_trade_time = time.time()
+
+    except Exception as e:
+
+        log(f"ERROR CERRANDO POSICIÓN: {e}")
 
 
 # ============================================================
 # INDICADORES
 # ============================================================
 
-def calculate_indicators(df):
+def calculate_signal(df):
+
+    if len(df) < 30:
+        return None
+
+    df = df.copy()
 
     df["ema9"] = (
         df["close"]
-        .ewm(
-            span=9,
-            adjust=False
-        )
+        .ewm(span=9, adjust=False)
         .mean()
     )
 
     df["ema21"] = (
         df["close"]
-        .ewm(
-            span=21,
-            adjust=False
-        )
+        .ewm(span=21, adjust=False)
         .mean()
     )
 
     delta = df["close"].diff()
 
-    gain = delta.clip(
-        lower=0
-    )
+    gain = delta.clip(lower=0)
 
-    loss = -delta.clip(
-        upper=0
-    )
+    loss = -delta.clip(upper=0)
 
     avg_gain = (
-        gain
-        .rolling(14)
+        gain.rolling(14)
         .mean()
     )
 
     avg_loss = (
-        loss
-        .rolling(14)
+        loss.rolling(14)
         .mean()
     )
 
-    rs = (
-        avg_gain /
-        avg_loss.replace(
-            0,
-            1e-10
-        )
+    rs = avg_gain / avg_loss.replace(
+        0,
+        1e-10
     )
 
-    df["rsi"] = (
-        100 -
-        (
-            100 /
-            (1 + rs)
-        )
+    df["rsi"] = 100 - (
+        100 / (1 + rs)
     )
 
     df["volume_ma"] = (
@@ -466,21 +512,117 @@ def calculate_indicators(df):
         .mean()
     )
 
-    return df
+    last = df.iloc[-1]
+
+    previous = df.iloc[-2]
+
+    close = float(last["close"])
+
+    ema9 = float(last["ema9"])
+
+    ema21 = float(last["ema21"])
+
+    rsi = float(last["rsi"])
+
+    volume = float(last["volume"])
+
+    volume_ma = float(last["volume_ma"])
+
+    open_price = float(last["open"])
+
+    body = close - open_price
+
+    previous_close = float(
+        previous["close"]
+    )
+
+    # ========================================================
+    # LONG
+    # ========================================================
+
+    long_score = 0
+
+    if ema9 > ema21:
+        long_score += 1
+
+    if close > ema9:
+        long_score += 1
+
+    if 50 < rsi < 72:
+        long_score += 1
+
+    if volume > volume_ma:
+        long_score += 1
+
+    if body > 0:
+        long_score += 1
+
+    if close > previous_close:
+        long_score += 1
+
+    # ========================================================
+    # SHORT
+    # ========================================================
+
+    short_score = 0
+
+    if ema9 < ema21:
+        short_score += 1
+
+    if close < ema9:
+        short_score += 1
+
+    if 28 < rsi < 50:
+        short_score += 1
+
+    if volume > volume_ma:
+        short_score += 1
+
+    if body < 0:
+        short_score += 1
+
+    if close < previous_close:
+        short_score += 1
+
+    log(
+        f"SIGNAL | "
+        f"price={close:.6f} | "
+        f"EMA9={ema9:.6f} | "
+        f"EMA21={ema21:.6f} | "
+        f"RSI={rsi:.1f} | "
+        f"LONG={long_score} | "
+        f"SHORT={short_score}"
+    )
+
+    # ========================================================
+    # ENTRADA MÁS ACTIVA
+    # ========================================================
+
+    if (
+        long_score >= MIN_SCORE
+        and long_score - short_score >= MIN_SCORE_GAP
+    ):
+
+        return "LONG"
+
+    if (
+        short_score >= MIN_SCORE
+        and short_score - long_score >= MIN_SCORE_GAP
+    ):
+
+        return "SHORT"
+
+    return None
 
 
 # ============================================================
-# ANÁLISIS
+# PROCESAR VELA CERRADA
 # ============================================================
 
-def analyze_market():
+def process_candle():
 
-    if len(candles) < 50:
-
-        return (
-            "NEUTRAL",
-            0
-        )
+    if len(candles) < 30:
+        return
 
     df = pd.DataFrame(
         candles,
@@ -494,403 +636,113 @@ def analyze_market():
         ]
     )
 
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
-    ]:
-
-        df[col] = (
-            df[col]
-            .astype(float)
-        )
-
-    df = calculate_indicators(df)
-
-    last = df.iloc[-1]
-
-    score_long = 0
-    score_short = 0
-
-    # TENDENCIA
-
-    if last["ema9"] > last["ema21"]:
-        score_long += 2
-
-    if last["ema9"] < last["ema21"]:
-        score_short += 2
-
-    # RSI
-
-    if 50 <= last["rsi"] <= 70:
-        score_long += 2
-
-    if 30 <= last["rsi"] <= 50:
-        score_short += 2
-
-    # VOLUMEN
-
-    if last["volume"] > last["volume_ma"]:
-
-        if last["close"] > last["open"]:
-            score_long += 1
-
-        elif last["close"] < last["open"]:
-            score_short += 1
-
-    # PRECIO VS EMA
-
-    if last["close"] > last["ema9"]:
-        score_long += 1
-
-    if last["close"] < last["ema9"]:
-        score_short += 1
-
-    # MOMENTUM
-
-    candle_range = (
-        last["high"] -
-        last["low"]
+    df["open"] = pd.to_numeric(
+        df["open"]
     )
 
-    if candle_range > 0:
-
-        body = abs(
-            last["close"] -
-            last["open"]
-        )
-
-        body_ratio = (
-            body /
-            candle_range
-        )
-
-        if body_ratio >= 0.45:
-
-            if last["close"] > last["open"]:
-                score_long += 1
-
-            elif last["close"] < last["open"]:
-                score_short += 1
-
-    log(
-        f"Precio={last['close']:.8f} "
-        f"EMA9={last['ema9']:.8f} "
-        f"EMA21={last['ema21']:.8f} "
-        f"RSI={last['rsi']:.2f} "
-        f"L={score_long} "
-        f"S={score_short}"
+    df["high"] = pd.to_numeric(
+        df["high"]
     )
 
-    if (
-        score_long >= 4
-        and
-        score_long >= score_short + 2
-    ):
-
-        return (
-            "LONG",
-            score_long
-        )
-
-    if (
-        score_short >= 4
-        and
-        score_short >= score_long + 2
-    ):
-
-        return (
-            "SHORT",
-            score_short
-        )
-
-    return (
-        "NEUTRAL",
-        max(
-            score_long,
-            score_short
-        )
+    df["low"] = pd.to_numeric(
+        df["low"]
     )
+
+    df["close"] = pd.to_numeric(
+        df["close"]
+    )
+
+    df["volume"] = pd.to_numeric(
+        df["volume"]
+    )
+
+    signal = calculate_signal(df)
+
+    if signal is None:
+        return
+
+    with state_lock:
+
+        current_side = position_side
+
+    # ========================================================
+    # SIN POSICIÓN
+    # ========================================================
+
+    if current_side is None:
+
+        open_position(signal)
+
+        return
+
+    # ========================================================
+    # CAMBIO DE DIRECCIÓN
+    # ========================================================
+
+    if current_side == "LONG" and signal == "SHORT":
+
+        close_position(
+            "señal contraria"
+        )
+
+        time.sleep(1)
+
+        open_position("SHORT")
+
+    elif current_side == "SHORT" and signal == "LONG":
+
+        close_position(
+            "señal contraria"
+        )
+
+        time.sleep(1)
+
+        open_position("LONG")
 
 
 # ============================================================
-# CANTIDAD
+# MANEJAR POSICIÓN
 # ============================================================
 
-def calculate_quantity(
-    price,
-    leverage
-):
+def manage_position():
 
-    balance = get_usdt_balance()
-
-    if balance <= 0:
-
-        raise Exception(
-            "No hay balance USDT disponible"
-        )
-
-    margin = min(
-        MARGIN_PER_TRADE_USDT,
-        balance * 0.25
-    )
-
-    notional = (
-        margin *
-        leverage
-    )
-
-    quantity = (
-        notional /
-        price
-    )
-
-    quantity = floor_step(
-        quantity,
-        QTY_STEP
-    )
-
-    if quantity < MIN_QTY:
-
-        raise Exception(
-            f"Cantidad calculada "
-            f"{quantity} menor al "
-            f"mínimo configurado "
-            f"{MIN_QTY}"
-        )
-
-    log(
-        f"Balance={balance:.4f} USDT | "
-        f"Margen={margin:.4f} USDT | "
-        f"Nocional={notional:.4f} USDT | "
-        f"Cantidad={quantity}"
-    )
-
-    return quantity
-
-
-# ============================================================
-# ABRIR POSICIÓN
-# ============================================================
-
-def open_position(side):
-
-    global last_trade_time
-    global position_side
-    global entry_price
     global highest_price
     global lowest_price
 
-    now = time.time()
+    with state_lock:
 
-    if (
-        now - last_trade_time
-        < COOLDOWN_SECONDS
-    ):
+        side = position_side
+        entry = entry_price
 
-        log("Cooldown activo.")
+    if side is None or entry <= 0:
         return
 
-    current_position, amount, current_entry = (
-        get_current_position(force=True)
-    )
+    price = current_price
 
-    if current_position is not None:
-
-        log(
-            f"Ya existe posición "
-            f"{current_position}."
-        )
-
+    if price is None:
         return
 
-    price = get_price()
+    # ========================================================
+    # LONG
+    # ========================================================
 
-    leverage = LEVERAGE
-
-    quantity = calculate_quantity(
-        price,
-        leverage
-    )
-
-    log(
-        f"ENTRADA {side} | "
-        f"Precio={price} | "
-        f"Leverage={leverage}x | "
-        f"Cantidad={quantity}"
-    )
-
-    if not LIVE_TRADING:
-
-        log(
-            "MODO PRUEBA: "
-            "NO SE ENVÍA ORDEN."
-        )
-
-        return
-
-    # Solo configuramos leverage cuando realmente
-    # vamos a operar.
-    set_leverage()
-
-    order_side = (
-        "BUY"
-        if side == "LONG"
-        else "SELL"
-    )
-
-    result = signed_request(
-        "POST",
-        "/fapi/v1/order",
-        {
-            "symbol": SYMBOL,
-            "side": order_side,
-            "type": "MARKET",
-            "quantity": format_number(
-                quantity
-            ),
-            "newOrderRespType": "RESULT"
-        }
-    )
-
-    log(
-        f"ORDEN EJECUTADA: {result}"
-    )
-
-    position_side = side
-
-    entry_price = float(
-        result.get(
-            "avgPrice",
-            price
-        )
-    )
-
-    highest_price = entry_price
-    lowest_price = entry_price
-
-    last_trade_time = now
-
-    get_current_position(force=True)
-
-
-# ============================================================
-# CERRAR POSICIÓN
-# ============================================================
-
-def close_position(reason):
-
-    global position_side
-    global entry_price
-    global highest_price
-    global lowest_price
-
-    current_position, amount, current_entry = (
-        get_current_position(force=True)
-    )
-
-    if current_position is None:
-
-        position_side = None
-        entry_price = 0.0
-        return
-
-    order_side = (
-        "SELL"
-        if current_position == "LONG"
-        else "BUY"
-    )
-
-    log(
-        f"CERRANDO {current_position} | "
-        f"Razón={reason}"
-    )
-
-    if not LIVE_TRADING:
-
-        log(
-            "MODO PRUEBA: "
-            "NO SE ENVÍA CIERRE."
-        )
-
-        return
-
-    result = signed_request(
-        "POST",
-        "/fapi/v1/order",
-        {
-            "symbol": SYMBOL,
-            "side": order_side,
-            "type": "MARKET",
-            "quantity": format_number(
-                amount
-            ),
-            "reduceOnly": "true",
-            "newOrderRespType": "RESULT"
-        }
-    )
-
-    log(
-        f"CIERRE EJECUTADO: {result}"
-    )
-
-    position_side = None
-    entry_price = 0.0
-    highest_price = 0.0
-    lowest_price = 0.0
-
-    get_current_position(force=True)
-
-
-# ============================================================
-# GESTIÓN DE POSICIÓN
-# ============================================================
-
-def manage_position(price):
-
-    global highest_price
-    global lowest_price
-    global entry_price
-    global position_side
-
-    current_position = position_side
-    current_entry = entry_price
-
-    if current_position is None:
-
-        pos, amount, entry = (
-            get_current_position()
-        )
-
-        if pos is None:
-            return
-
-        position_side = pos
-        entry_price = entry
-
-        current_position = pos
-        current_entry = entry
-
-    if current_entry <= 0:
-        return
-
-    if current_position == "LONG":
+    if side == "LONG":
 
         if highest_price == 0:
-            highest_price = current_entry
-
-        if price > highest_price:
             highest_price = price
 
+        highest_price = max(
+            highest_price,
+            price
+        )
+
         stop_price = (
-            current_entry *
+            entry *
             (1 - STOP_LOSS_PCT)
         )
 
-        take_profit = (
-            current_entry *
+        take_price = (
+            entry *
             (1 + TAKE_PROFIT_PCT)
         )
 
@@ -901,38 +753,46 @@ def manage_position(price):
 
         if price <= stop_price:
 
-            close_position("STOP LOSS")
-            return
+            close_position(
+                "STOP LOSS"
+            )
 
-        if price >= take_profit:
+        elif price >= take_price:
 
-            close_position("TAKE PROFIT")
-            return
+            close_position(
+                "TAKE PROFIT"
+            )
 
-        if (
-            price <= trailing_price
-            and
-            price > current_entry
+        elif (
+            highest_price > entry
+            and price <= trailing_price
         ):
 
-            close_position("TRAILING STOP")
-            return
+            close_position(
+                "TRAILING STOP"
+            )
 
-    elif current_position == "SHORT":
+    # ========================================================
+    # SHORT
+    # ========================================================
+
+    elif side == "SHORT":
 
         if lowest_price == 0:
-            lowest_price = current_entry
-
-        if price < lowest_price:
             lowest_price = price
 
+        lowest_price = min(
+            lowest_price,
+            price
+        )
+
         stop_price = (
-            current_entry *
+            entry *
             (1 + STOP_LOSS_PCT)
         )
 
-        take_profit = (
-            current_entry *
+        take_price = (
+            entry *
             (1 - TAKE_PROFIT_PCT)
         )
 
@@ -943,141 +803,524 @@ def manage_position(price):
 
         if price >= stop_price:
 
-            close_position("STOP LOSS")
-            return
+            close_position(
+                "STOP LOSS"
+            )
 
-        if price <= take_profit:
+        elif price <= take_price:
 
-            close_position("TAKE PROFIT")
-            return
+            close_position(
+                "TAKE PROFIT"
+            )
 
-        if (
-            price >= trailing_price
-            and
-            price < current_entry
+        elif (
+            lowest_price < entry
+            and price >= trailing_price
         ):
 
-            close_position("TRAILING STOP")
-            return
+            close_position(
+                "TRAILING STOP"
+            )
 
 
 # ============================================================
-# VELAS MEDIANTE WEBSOCKET
+# WEBSOCKET DE MERCADO
 # ============================================================
 
-def update_candle_from_websocket(k):
+def on_market_message(ws, message):
 
-    candle = [
-        k["t"],
-        float(k["o"]),
-        float(k["h"]),
-        float(k["l"]),
-        float(k["c"]),
-        float(k["v"])
-    ]
-
-    if candles:
-
-        if candles[-1][0] == k["t"]:
-
-            candles[-1] = candle
-
-        else:
-
-            candles.append(candle)
-
-    else:
-
-        candles.append(candle)
-
-    if len(candles) > 200:
-
-        candles.pop(0)
-
-
-# ============================================================
-# WEBSOCKET
-# ============================================================
-
-def on_message(ws, message):
+    global current_price
 
     try:
 
         data = json.loads(message)
 
-        if data.get("e") != "kline":
+        kline = data.get("k")
+
+        if not kline:
             return
 
-        k = data["k"]
+        close_price = float(
+            kline["c"]
+        )
 
-        price = float(k["c"])
+        current_price = close_price
 
-        update_candle_from_websocket(k)
+        # ====================================================
+        # SOLO VELA CERRADA
+        # ====================================================
 
-        manage_position(price)
+        if kline["x"]:
 
-        if k["x"]:
+            candle = [
+                int(kline["t"]),
+                float(kline["o"]),
+                float(kline["h"]),
+                float(kline["l"]),
+                float(kline["c"]),
+                float(kline["v"])
+            ]
 
-            if len(candles) < 50:
+            if candles:
 
-                log(
-                    f"Recolectando velas "
-                    f"{len(candles)}/50..."
-                )
+                if candles[-1][0] == candle[0]:
 
-                return
+                    candles[-1] = candle
 
-            signal, score = (
-                analyze_market()
-            )
+                else:
 
-            log(
-                f"SEÑAL ACTUAL: "
-                f"{signal} "
-                f"(score {score})"
-            )
+                    candles.append(candle)
 
-            if signal == "LONG":
+            else:
 
-                open_position("LONG")
+                candles.append(candle)
 
-            elif signal == "SHORT":
+            if len(candles) > 300:
 
-                open_position("SHORT")
+                del candles[:-300]
+
+            process_candle()
 
     except Exception as e:
 
         log(
-            f"ERROR procesando mensaje: {e}"
+            f"Error procesando market WS: {e}"
         )
 
 
-def on_error(ws, error):
+def on_market_error(ws, error):
 
     log(
-        f"WebSocket ERROR: {error}"
+        f"Market WS error: {error}"
     )
 
 
-def on_close(
-    ws,
-    close_status_code,
-    close_msg
+def on_market_close(ws, close_status_code, close_msg):
+
+    log(
+        f"Market WS cerrado: "
+        f"{close_status_code} {close_msg}"
+    )
+
+
+def on_market_open(ws):
+
+    log(
+        "MARKET WEBSOCKET CONECTADO"
+    )
+
+
+def market_websocket_loop():
+
+    while True:
+
+        try:
+
+            log(
+                "Conectando Market WebSocket..."
+            )
+
+            ws = websocket.WebSocketApp(
+                MARKET_WS,
+                on_open=on_market_open,
+                on_message=on_market_message,
+                on_error=on_market_error,
+                on_close=on_market_close
+            )
+
+            ws.run_forever(
+                ping_interval=60,
+                ping_timeout=20
+            )
+
+        except Exception as e:
+
+            log(
+                f"Market WS exception: {e}"
+            )
+
+        log(
+            "Reconexión Market WS en 60 segundos..."
+        )
+
+        time.sleep(60)
+
+
+# ============================================================
+# USER DATA STREAM
+# ============================================================
+
+def create_listen_key():
+
+    if not rest_allowed():
+
+        raise Exception(
+            "REST pausado"
+        )
+
+    headers = {
+        "X-MBX-APIKEY": API_KEY
+    }
+
+    response = requests.post(
+        BASE_URL + "/fapi/v1/listenKey",
+        headers=headers,
+        timeout=10
+    )
+
+    if response.status_code in (418, 429):
+
+        retry_after = response.headers.get(
+            "Retry-After"
+        )
+
+        try:
+            wait = int(retry_after)
+        except:
+            wait = 120
+
+        pause_rest(wait)
+
+        raise Exception(
+            f"User stream rate limit "
+            f"{response.status_code}"
+        )
+
+    if response.status_code >= 400:
+
+        raise Exception(
+            response.text
+        )
+
+    return response.json()["listenKey"]
+
+
+def keepalive_listen_key(listen_key):
+
+    if not rest_allowed():
+        return
+
+    headers = {
+        "X-MBX-APIKEY": API_KEY
+    }
+
+    try:
+
+        response = requests.put(
+            BASE_URL + "/fapi/v1/listenKey",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code in (418, 429):
+
+            retry_after = response.headers.get(
+                "Retry-After"
+            )
+
+            try:
+                wait = int(retry_after)
+            except:
+                wait = 120
+
+            pause_rest(wait)
+
+            log(
+                f"User stream keepalive: "
+                f"Binance {response.status_code}"
+            )
+
+    except Exception as e:
+
+        log(
+            f"Keepalive error: {e}"
+        )
+
+
+def user_stream_keepalive_loop(listen_key):
+
+    while True:
+
+        time.sleep(45 * 60)
+
+        keepalive_listen_key(
+            listen_key
+        )
+
+
+# ============================================================
+# USER DATA EVENTS
+# ============================================================
+
+def process_account_update(data):
+
+    global position_side
+    global position_qty
+    global entry_price
+
+    account = data.get("a", {})
+
+    positions = account.get(
+        "P",
+        []
+    )
+
+    for p in positions:
+
+        if p.get("s") != SYMBOL:
+            continue
+
+        amt = float(
+            p.get("pa", 0)
+        )
+
+        entry = float(
+            p.get("ep", 0)
+        )
+
+        if amt > 0:
+
+            position_side = "LONG"
+            position_qty = amt
+            entry_price = entry
+
+            log(
+                f"ACCOUNT UPDATE -> "
+                f"LONG qty={amt} "
+                f"entry={entry}"
+            )
+
+        elif amt < 0:
+
+            position_side = "SHORT"
+            position_qty = abs(amt)
+            entry_price = entry
+
+            log(
+                f"ACCOUNT UPDATE -> "
+                f"SHORT qty={abs(amt)} "
+                f"entry={entry}"
+            )
+
+        else:
+
+            position_side = None
+            position_qty = 0.0
+            entry_price = 0.0
+
+            highest_price = 0.0
+            lowest_price = 0.0
+
+            log(
+                "ACCOUNT UPDATE -> "
+                "posición cerrada"
+            )
+
+
+def process_order_update(data):
+
+    order = data.get("o", {})
+
+    symbol = order.get("s")
+
+    if symbol != SYMBOL:
+        return
+
+    status = order.get("X")
+
+    side = order.get("S")
+
+    executed_qty = order.get(
+        "z",
+        "0"
+    )
+
+    avg_price = order.get(
+        "ap",
+        "0"
+    )
+
+    if status == "FILLED":
+
+        log(
+            f"ORDER FILLED | "
+            f"side={side} | "
+            f"qty={executed_qty} | "
+            f"avg={avg_price}"
+        )
+
+
+def on_user_message(ws, message):
+
+    try:
+
+        data = json.loads(message)
+
+        event_type = data.get("e")
+
+        if event_type == "ACCOUNT_UPDATE":
+
+            process_account_update(
+                data
+            )
+
+        elif event_type == "ORDER_TRADE_UPDATE":
+
+            process_order_update(
+                data
+            )
+
+        elif event_type == "listenKeyExpired":
+
+            log(
+                "ListenKey expirado"
+            )
+
+    except Exception as e:
+
+        log(
+            f"Error User WS: {e}"
+        )
+
+
+def on_user_error(ws, error):
+
+    log(
+        f"User WS error: {error}"
+    )
+
+
+def on_user_close(ws, code, msg):
+
+    log(
+        f"User WS cerrado: {code} {msg}"
+    )
+
+
+def on_user_open(ws):
+
+    log(
+        "USER DATA WEBSOCKET CONECTADO"
+    )
+
+
+def user_websocket_loop():
+
+    while True:
+
+        listen_key = None
+
+        try:
+
+            log(
+                "Creando User Data Stream..."
+            )
+
+            listen_key = create_listen_key()
+
+            ws_url = (
+                "wss://fstream.binance.com/ws/"
+                + listen_key
+            )
+
+            ws = websocket.WebSocketApp(
+                ws_url,
+                on_open=on_user_open,
+                on_message=on_user_message,
+                on_error=on_user_error,
+                on_close=on_user_close
+            )
+
+            ws.run_forever(
+                ping_interval=60,
+                ping_timeout=20
+            )
+
+        except Exception as e:
+
+            log(
+                f"User WS exception: {e}"
+            )
+
+        log(
+            "Reconexión User WS en 60 segundos..."
+        )
+
+        time.sleep(60)
+
+
+# ============================================================
+# HILO PARA CONTROLAR POSICIÓN
+# ============================================================
+
+def position_manager_loop():
+
+    while True:
+
+        try:
+
+            manage_position()
+
+        except Exception as e:
+
+            log(
+                f"Position manager error: {e}"
+            )
+
+        time.sleep(1)
+
+
+# ============================================================
+# HEALTH CHECK RENDER
+# ============================================================
+
+class HealthHandler(
+    BaseHTTPRequestHandler
 ):
 
-    log(
-        f"WebSocket cerrado: "
-        f"{close_status_code} "
-        f"{close_msg}"
+    def do_GET(self):
+
+        self.send_response(200)
+
+        self.send_header(
+            "Content-type",
+            "text/plain"
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            b"BOT ONLINE"
+        )
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+        return
+
+
+def health_server():
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
-
-def on_open(ws):
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
 
     log(
-        "WebSocket conectado "
-        "correctamente."
+        f"Health server escuchando "
+        f"en puerto {port}"
     )
+
+    server.serve_forever()
 
 
 # ============================================================
@@ -1091,11 +1334,31 @@ def main():
     )
 
     log(
-        "BOT ONGUSDT FUTURES"
+        "      ONGUSDT FUTURES BOT"
     )
 
     log(
         "===================================="
+    )
+
+    log(
+        f"LIVE_TRADING = {LIVE_TRADING}"
+    )
+
+    log(
+        f"MARGIN = {MARGIN_PER_TRADE_USDT} USDT"
+    )
+
+    log(
+        f"LEVERAGE = {LEVERAGE}x"
+    )
+
+    log(
+        f"MIN_SCORE = {MIN_SCORE}"
+    )
+
+    log(
+        f"MIN_SCORE_GAP = {MIN_SCORE_GAP}"
     )
 
     if not API_KEY or not API_SECRET:
@@ -1103,112 +1366,75 @@ def main():
         raise Exception(
             "Faltan las variables "
             "BINANCE_API_KEY y "
-            "BINANCE_API_SECRET "
-            "en Render."
+            "BINANCE_API_SECRET"
         )
 
-    log(
-        f"LIVE_TRADING = {LIVE_TRADING}"
-    )
-
-    log(
-        f"MARGEN POR OPERACIÓN = "
-        f"{MARGIN_PER_TRADE_USDT} USDT"
-    )
-
-    log(
-        "Modo seguro: NO se consulta "
-        "exchangeInfo al iniciar."
-    )
-
-    log(
-        "Las velas se cargarán "
-        "mediante WebSocket."
-    )
-
     # ========================================================
-    # Solo consultamos balance/posición.
-    # No hacemos exchangeInfo.
+    # LEVERAGE
     # ========================================================
 
     if LIVE_TRADING:
 
-        balance = get_usdt_balance()
-
         log(
-            f"Balance Futures disponible: "
-            f"{balance:.4f} USDT"
+            "Configurando leverage..."
         )
 
-        current_position, amount, entry = (
-            get_current_position(force=True)
-        )
+        set_leverage()
 
-        if current_position:
+    # ========================================================
+    # HEALTH
+    # ========================================================
 
-            log(
-                f"POSICIÓN EXISTENTE: "
-                f"{current_position} "
-                f"cantidad={amount} "
-                f"entrada={entry}"
-            )
+    threading.Thread(
+        target=health_server,
+        daemon=True
+    ).start()
 
-            global position_side
-            global entry_price
+    # ========================================================
+    # MARKET WEBSOCKET
+    # ========================================================
 
-            position_side = current_position
-            entry_price = entry
+    threading.Thread(
+        target=market_websocket_loop,
+        daemon=True
+    ).start()
 
-    else:
+    # ========================================================
+    # USER DATA WEBSOCKET
+    # ========================================================
 
-        log(
-            "MODO PRUEBA ACTIVADO."
-        )
+    threading.Thread(
+        target=user_websocket_loop,
+        daemon=True
+    ).start()
 
-        log(
-            "No se enviarán órdenes "
-            "reales a Binance."
-        )
+    # ========================================================
+    # POSITION MANAGER
+    # ========================================================
+
+    threading.Thread(
+        target=position_manager_loop,
+        daemon=True
+    ).start()
 
     log(
-        "Esperando 50 velas "
-        "cerradas antes de analizar..."
+        "BOT INICIADO CORRECTAMENTE"
     )
 
-    websocket_url = (
-        "wss://fstream.binance.com/ws/"
-        f"{SYMBOL.lower()}@kline_1m"
+    log(
+        "Esperando datos de mercado..."
     )
 
     while True:
 
-        try:
-
-            ws = websocket.WebSocketApp(
-                websocket_url,
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-
-            ws.run_forever(
-                ping_interval=20,
-                ping_timeout=10
-            )
-
-        except Exception as e:
-
-            log(
-                f"WebSocket exception: {e}"
-            )
+        time.sleep(60)
 
         log(
-            "Reconectando en "
-            "30 segundos..."
+            f"STATUS | "
+            f"price={current_price} | "
+            f"position={position_side} | "
+            f"qty={position_qty}"
         )
-
-        time.sleep(30)
 
 
 # ============================================================
@@ -1217,11 +1443,14 @@ def main():
 
 if __name__ == "__main__":
 
-    http_thread = threading.Thread(
-        target=start_http_server,
-        daemon=True
-    )
+    try:
 
-    http_thread.start()
+        main()
 
-    main()
+    except Exception as e:
+
+        log(
+            f"FATAL ERROR: {e}"
+        )
+
+        time.sleep(30)
