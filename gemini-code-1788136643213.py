@@ -114,6 +114,16 @@ def log(msg):
     print(f"[{now}] {msg}", flush=True)
 
 
+def log_public_ip():
+    """Muestra en los logs la IP publica con la que sale este servidor."""
+    try:
+        response = requests.get("https://api.ipify.org?format=json", timeout=10)
+        ip = response.json().get("ip", "desconocida")
+        log(f"IP PUBLICA DE SALIDA (para whitelist en Binance): {ip}")
+    except Exception as e:
+        log(f"No se pudo obtener la IP publica: {e}")
+
+
 # ============================================================
 # REST CONTROL
 # ============================================================
@@ -953,6 +963,9 @@ def main():
     log("====================================")
     log("      ONGUSDT FUTURES BOT")
     log("====================================")
+
+    log_public_ip()
+
     log(f"USE_TESTNET = {USE_TESTNET}")
     log(f"LIVE_TRADING = {LIVE_TRADING}")
     log(f"MARGIN base = {MARGIN_PER_TRADE_USDT} USDT (rango {MARGIN_MIN_USDT}-{MARGIN_MAX_USDT})")
