@@ -589,7 +589,7 @@ def manage_position():
     if price is None:
         return
 
-    # Si por algun motivo todavia no hay ATR calculado, usa un fallback
+    # Si por algun motivo todavia no hay ATR calculated, usa un fallback
     # chico en % para no dejar la posicion sin proteccion
     atr = current_atr if current_atr else entry * 0.01
 
@@ -735,7 +735,7 @@ def user_stream_keepalive_loop():
 
     while True:
 
-        time.sleep(30 * 60) # Renovacion cada 30 minutos
+        time.sleep(30 * 60)
 
         try:
             if listen_key:
