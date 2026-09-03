@@ -23,19 +23,16 @@ SYMBOL = "ONGUSDT"
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-# ============================================================
-# MODO: cambia entre real y testnet con una sola variable
-# ============================================================
-
+# MODO: cambia entre real y testnet según variable de entorno
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 if USE_TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
-    MARKET_WS = f"wss://stream.binancefuture.com/stream?streams={SYMBOL.lower()}@kline_1m"
+    MARKET_WS = f"wss://stream.binancefuture.com/ws/{SYMBOL.lower()}@kline_1m"
     WS_API_URL = "wss://testnet.binancefuture.com/ws-fapi/v1"
 else:
     BASE_URL = "https://fapi.binance.com"
-    MARKET_WS = f"wss://fstream.binance.com/stream?streams={SYMBOL.lower()}@kline_1m"
+    MARKET_WS = f"wss://fstream.binance.com/ws/{SYMBOL.lower()}@kline_1m"
     WS_API_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
 # ============================================================
@@ -63,7 +60,7 @@ MIN_SCORE = 3
 MIN_SCORE_GAP = 1
 
 # ============================================================
-# VARIABLES
+# VARIABLES DE ESTADO
 # ============================================================
 
 candles = []
@@ -606,35 +603,37 @@ def on_market_message(ws, message):
 
     try:
         data = json.loads(message)
-        
-        # Correccion clave: desempaca cuando viene de streams combinados
+
         if "data" in data:
             data = data["data"]
 
-        kline = data.get("k")
-        if not kline:
-            return
+        # Lee directamente el evento de la vela
+        kline = data.get("k") if "k" in data else data.get("kline")
+        if not kline and data.get("e") == "kline":
+            kline = data
 
-        current_price = float(kline["c"])
+        if kline:
+            if "c" in kline:
+                current_price = float(kline["c"])
 
-        if kline["x"]:
-            candle = [
-                int(kline["t"]), float(kline["o"]), float(kline["h"]),
-                float(kline["l"]), float(kline["c"]), float(kline["v"])
-            ]
+            if kline.get("x"):
+                candle = [
+                    int(kline["t"]), float(kline["o"]), float(kline["h"]),
+                    float(kline["l"]), float(kline["c"]), float(kline["v"])
+                ]
 
-            if candles:
-                if candles[-1][0] == candle[0]:
-                    candles[-1] = candle
+                if candles:
+                    if candles[-1][0] == candle[0]:
+                        candles[-1] = candle
+                    else:
+                        candles.append(candle)
                 else:
                     candles.append(candle)
-            else:
-                candles.append(candle)
 
-            if len(candles) > 300:
-                del candles[:-300]
+                if len(candles) > 300:
+                    del candles[:-300]
 
-            process_candle()
+                process_candle()
 
     except Exception as e:
         log(f"Error market WS: {e}")
@@ -649,15 +648,19 @@ def on_market_close(ws, code, msg):
 
 
 def on_market_open(ws):
-    log("MARKET WEBSOCKET CONECTADO")
+    log("MARKET WEBSOCKET CONECTADO Y TRANSMITIENDO")
 
 
 def market_websocket_loop():
     while True:
         try:
-            log(f"Conectando Market WebSocket en {MARKET_WS}...")
+            url = f"wss://fstream.binance.com/ws/{SYMBOL.lower()}@kline_1m"
+            if USE_TESTNET:
+                url = f"wss://stream.binancefuture.com/ws/{SYMBOL.lower()}@kline_1m"
+
+            log(f"Conectando Market WebSocket en {url}...")
             ws = websocket.WebSocketApp(
-                MARKET_WS,
+                url,
                 on_open=on_market_open,
                 on_message=on_market_message,
                 on_error=on_market_error,
