@@ -77,6 +77,7 @@ MIN_SCORE_GAP = 1
 candles = []
 
 current_price = None
+last_price_update = 0
 
 position_side = None
 position_qty = 0.0
@@ -636,15 +637,17 @@ def manage_position():
 
 def on_market_message(ws, message):
 
-    global current_price
+    global current_price, last_price_update
 
     try:
         data = json.loads(message)
         kline = data.get("k")
         if not kline:
+            log(f"Market WS mensaje sin 'k': {message[:200]}")
             return
 
         current_price = float(kline["c"])
+        last_price_update = time.time()
 
         if kline["x"]:
             candle = [
@@ -683,9 +686,13 @@ def on_market_open(ws):
 
 def market_websocket_loop():
 
+    global last_price_update
+
     while True:
         try:
             log("Conectando Market WebSocket...")
+            last_price_update = time.time()
+
             ws = websocket.WebSocketApp(
                 MARKET_WS,
                 on_open=on_market_open,
@@ -693,13 +700,36 @@ def market_websocket_loop():
                 on_error=on_market_error,
                 on_close=on_market_close
             )
-            ws.run_forever(ping_interval=60, ping_timeout=20)
+
+            ws_thread = threading.Thread(
+                target=lambda: ws.run_forever(ping_interval=60, ping_timeout=20),
+                daemon=True
+            )
+            ws_thread.start()
+
+            # Watchdog: si no llega ni un precio en 90s, forzamos reconexion
+            while ws_thread.is_alive():
+
+                time.sleep(10)
+
+                sin_datos = time.time() - last_price_update
+
+                if sin_datos > 90:
+                    log(
+                        f"WATCHDOG: sin datos de precio hace {sin_datos:.0f}s, "
+                        f"forzando reconexión del Market WebSocket"
+                    )
+                    try:
+                        ws.close()
+                    except:
+                        pass
+                    break
 
         except Exception as e:
             log(f"Market WS exception: {e}")
 
-        log("Reconexión Market WS en 60 segundos...")
-        time.sleep(60)
+        log("Reconexión Market WS en 15 segundos...")
+        time.sleep(15)
 
 
 # ============================================================
