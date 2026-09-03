@@ -25,45 +25,37 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 # ============================================================
 # MODO: cambia entre real y testnet con una sola variable
-# En Railway podes setear USE_TESTNET=true como variable de entorno
 # ============================================================
 
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 if USE_TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
-    MARKET_WS = "wss://stream.binancefuture.com/ws/ongusdt@kline_1m"
+    MARKET_WS = f"wss://stream.binancefuture.com/stream?streams={SYMBOL.lower()}@kline_1m"
     WS_API_URL = "wss://testnet.binancefuture.com/ws-fapi/v1"
 else:
     BASE_URL = "https://fapi.binance.com"
-    MARKET_WS = "wss://fstream.binance.com/ws/ongusdt@kline_1m"
+    MARKET_WS = f"wss://fstream.binance.com/stream?streams={SYMBOL.lower()}@kline_1m"
     WS_API_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
 # ============================================================
 # TRADING
 # ============================================================
 
-# Se ejecutan ordenes reales solo si esto es True.
-# En Testnet no importa (es dinero ficticio), pero en real
-# arrancalo en False un rato para ver logs antes de operar.
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 MARGIN_PER_TRADE_USDT = 2.5
-MARGIN_MIN_USDT = 1.0        # margen minimo si la volatilidad esta muy alta
-MARGIN_MAX_USDT = 4.0        # margen maximo si la volatilidad esta muy baja
+MARGIN_MIN_USDT = 1.0        
+MARGIN_MAX_USDT = 4.0        
 LEVERAGE = 6
-MARGIN_TYPE = "ISOLATED"  # ISOLATED o CROSSED
+MARGIN_TYPE = "ISOLATED"  
 
-# Stop/Take/Trailing ahora se calculan en base al ATR (volatilidad reciente)
-# en vez de un porcentaje fijo. Estos multiplicadores son lo que se ajusta.
 ATR_PERIOD = 14
 ATR_STOP_MULT = 1.5
 ATR_TAKE_MULT = 2.5
 ATR_TRAILING_MULT = 1.0
 
-# Si el ATR relativo (ATR/precio) esta por debajo de esto, el mercado
-# esta demasiado plano y el bot no opera (evita ruido / señales falsas)
-MIN_ATR_PCT = 0.003  # 0.3%
+MIN_ATR_PCT = 0.003  
 
 COOLDOWN_SECONDS = 60
 
@@ -85,7 +77,6 @@ entry_price = 0.0
 highest_price = 0.0
 lowest_price = 0.0
 
-# ATR actual, se recalcula en cada vela cerrada
 current_atr = None
 
 last_trade_time = 0
@@ -99,7 +90,6 @@ user_stream_control_lock = threading.Lock()
 
 listen_key = None
 
-# Reglas reales del simbolo, se completan al arrancar
 QTY_STEP = 1.0
 MIN_QTY = 1.0
 MIN_NOTIONAL = 5.0
@@ -115,7 +105,6 @@ def log(msg):
 
 
 def log_public_ip():
-    """Muestra en los logs la IP publica con la que sale este servidor."""
     try:
         response = requests.get("https://api.ipify.org?format=json", timeout=10)
         ip = response.json().get("ip", "desconocida")
@@ -197,7 +186,6 @@ def signed_request(method, endpoint, params=None):
 
 
 def public_request(endpoint, params=None):
-    """Request publico, sin firma (para exchangeInfo)."""
     url = BASE_URL + endpoint
     response = requests.get(url, params=params, timeout=10)
     if response.status_code >= 400:
@@ -210,20 +198,16 @@ def public_request(endpoint, params=None):
 # ============================================================
 
 def load_symbol_rules():
-    """Trae step size, minQty y minNotional reales desde Binance."""
-
     global QTY_STEP, MIN_QTY, MIN_NOTIONAL
 
     try:
         data = public_request("/fapi/v1/exchangeInfo")
 
         for s in data.get("symbols", []):
-
             if s.get("symbol") != SYMBOL:
                 continue
 
             for f in s.get("filters", []):
-
                 if f.get("filterType") == "LOT_SIZE":
                     QTY_STEP = float(f.get("stepSize", QTY_STEP))
                     MIN_QTY = float(f.get("minQty", MIN_QTY))
@@ -275,16 +259,14 @@ def set_margin_type():
         signed_request("POST", "/fapi/v1/marginType", {"symbol": SYMBOL, "marginType": MARGIN_TYPE})
         log(f"Margin type configurado: {MARGIN_TYPE}")
     except Exception as e:
-        # Binance tira error si ya estaba seteado en ese modo; no es fatal
         log(f"Margin type (puede que ya estuviera seteado): {e}")
 
 
 # ============================================================
-# ATR (Average True Range) - mide volatilidad reciente
+# ATR (Average True Range)
 # ============================================================
 
 def calculate_atr(df, period=ATR_PERIOD):
-
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -302,35 +284,27 @@ def calculate_atr(df, period=ATR_PERIOD):
 
 
 # ============================================================
-# CANTIDAD (ajustada por volatilidad)
+# CANTIDAD
 # ============================================================
 
 def calculate_margin_by_volatility(price):
-    """
-    Mas volatilidad relativa -> menos margen por operacion.
-    Menos volatilidad relativa -> mas margen (dentro de los limites).
-    """
-
     if current_atr is None or price <= 0:
         return MARGIN_PER_TRADE_USDT
 
     atr_pct = current_atr / price
 
-    # A mayor atr_pct, factor mas chico. Referencia: 0.3% = base, 1.5% = minimo
     if atr_pct <= MIN_ATR_PCT:
         factor = 1.0
     else:
         factor = max(0.3, MIN_ATR_PCT / atr_pct)
 
     margin = MARGIN_PER_TRADE_USDT * factor
-
     margin = max(MARGIN_MIN_USDT, min(MARGIN_MAX_USDT, margin))
 
     return margin
 
 
 def calculate_quantity(price):
-
     balance = get_usdt_balance()
 
     if balance <= 0:
@@ -361,7 +335,6 @@ def calculate_quantity(price):
 # ============================================================
 
 def open_position(side):
-
     global last_trade_time, position_side, position_qty, entry_price
     global highest_price, lowest_price
 
@@ -413,7 +386,6 @@ def open_position(side):
 
 
 def close_position(reason="signal"):
-
     global position_side, position_qty, entry_price
     global highest_price, lowest_price, last_trade_time
 
@@ -461,7 +433,6 @@ def close_position(reason="signal"):
 # ============================================================
 
 def calculate_signal(df):
-
     if len(df) < 30:
         return None
 
@@ -528,7 +499,6 @@ def calculate_signal(df):
 # ============================================================
 
 def process_candle():
-
     global current_atr
 
     if len(candles) < 30:
@@ -575,7 +545,6 @@ def process_candle():
 # ============================================================
 
 def manage_position():
-
     global highest_price, lowest_price
 
     with state_lock:
@@ -589,8 +558,6 @@ def manage_position():
     if price is None:
         return
 
-    # Si por algun motivo todavia no hay ATR calculated, usa un fallback
-    # chico en % para no dejar la posicion sin proteccion
     atr = current_atr if current_atr else entry * 0.01
 
     stop_distance = atr * ATR_STOP_MULT
@@ -598,7 +565,6 @@ def manage_position():
     trailing_distance = atr * ATR_TRAILING_MULT
 
     if side == "LONG":
-
         if highest_price == 0:
             highest_price = price
         highest_price = max(highest_price, price)
@@ -615,7 +581,6 @@ def manage_position():
             close_position("TRAILING STOP (ATR)")
 
     elif side == "SHORT":
-
         if lowest_price == 0:
             lowest_price = price
         lowest_price = min(lowest_price, price)
@@ -637,11 +602,15 @@ def manage_position():
 # ============================================================
 
 def on_market_message(ws, message):
-
     global current_price
 
     try:
         data = json.loads(message)
+        
+        # Correccion clave: desempaca cuando viene de streams combinados
+        if "data" in data:
+            data = data["data"]
+
         kline = data.get("k")
         if not kline:
             return
@@ -684,10 +653,9 @@ def on_market_open(ws):
 
 
 def market_websocket_loop():
-
     while True:
         try:
-            log("Conectando Market WebSocket...")
+            log(f"Conectando Market WebSocket en {MARKET_WS}...")
             ws = websocket.WebSocketApp(
                 MARKET_WS,
                 on_open=on_market_open,
@@ -705,11 +673,10 @@ def market_websocket_loop():
 
 
 # ============================================================
-# USER DATA STREAM (AJUSTADO A REST HTTP)
+# USER DATA STREAM
 # ============================================================
 
 def start_user_data_stream():
-
     global listen_key
 
     log("Solicitando listenKey vía REST para User Data Stream...")
@@ -730,11 +697,9 @@ def start_user_data_stream():
 
 
 def user_stream_keepalive_loop():
-
     global listen_key
 
     while True:
-
         time.sleep(30 * 60)
 
         try:
@@ -746,14 +711,12 @@ def user_stream_keepalive_loop():
 
 
 def process_account_update(data):
-
     global position_side, position_qty, entry_price, highest_price, lowest_price
 
     account = data.get("a", {})
     positions = account.get("P", [])
 
     for p in positions:
-
         if p.get("s") != SYMBOL:
             continue
 
@@ -761,7 +724,6 @@ def process_account_update(data):
         entry = float(p.get("ep", 0))
 
         with state_lock:
-
             if amt > 0:
                 position_side = "LONG"
                 position_qty = amt
@@ -788,7 +750,6 @@ def process_account_update(data):
 
 
 def process_order_update(data):
-
     order = data.get("o", {})
     if order.get("s") != SYMBOL:
         return
@@ -831,11 +792,9 @@ def on_user_open(ws):
 
 
 def user_websocket_loop():
-
     global listen_key
 
     while True:
-
         stream_ws = None
 
         try:
@@ -889,7 +848,6 @@ def position_manager_loop():
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
-
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
@@ -912,7 +870,6 @@ def health_server():
 # ============================================================
 
 def main():
-
     log("====================================")
     log("      ONGUSDT FUTURES BOT")
     log("====================================")
