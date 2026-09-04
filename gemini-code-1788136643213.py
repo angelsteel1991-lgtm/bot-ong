@@ -32,11 +32,11 @@ USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 if USE_TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
-    MARKET_WS = "wss://stream.binancefuture.com/ws/ongusdt@kline_1m"
+    MARKET_WS = "wss://stream.binancefuture.com/stream?streams=ongusdt@kline_1m"
     WS_API_URL = "wss://testnet.binancefuture.com/ws-fapi/v1"
 else:
     BASE_URL = "https://fapi.binance.com"
-    MARKET_WS = "wss://fstream.binance.com/ws/ongusdt@kline_1m"
+    MARKET_WS = "wss://fstream.binance.com/stream?streams=ongusdt@kline_1m"
     WS_API_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
 # ============================================================
@@ -640,7 +640,12 @@ def on_market_message(ws, message):
     global current_price, last_price_update
 
     try:
-        data = json.loads(message)
+        raw = json.loads(message)
+
+        # El stream combinado envuelve el mensaje en {"stream": "...", "data": {...}}
+        # El stream simple manda el kline directo. Soportamos los dos formatos.
+        data = raw.get("data", raw)
+
         kline = data.get("k")
         if not kline:
             log(f"Market WS mensaje sin 'k': {message[:200]}")
