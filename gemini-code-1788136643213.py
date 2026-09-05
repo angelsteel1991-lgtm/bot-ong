@@ -24,11 +24,10 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 # ============================================================
-# MODO: cambia entre real y testnet con una sola variable
-# En Railway podes setear USE_TESTNET=true como variable de entorno
+# MODO REAL
 # ============================================================
 
-USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
+USE_TESTNET = False
 
 if USE_TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
@@ -39,25 +38,30 @@ else:
     MARKET_WS = "wss://fstream.binance.com/market/ws/ongusdt@kline_1m"
     WS_API_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
+
 # ============================================================
-# TRADING
+# TRADING REAL
 # ============================================================
 
-# Se ejecutan ordenes reales solo si esto es True.
-# En Testnet no importa (es dinero ficticio), pero en real
-# arrancalo en False un rato para ver logs antes de operar.
-LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
+LIVE_TRADING = True
 
 MARGIN_PER_TRADE_USDT = 2.5
 MARGIN_MIN_USDT = 1.0
 MARGIN_MAX_USDT = 4.0
+
 LEVERAGE = 6
 MARGIN_TYPE = "ISOLATED"
 
-# Stop/Take/Trailing ahora se calculan en base al ATR
+# ============================================================
+# ATR / GESTIÓN
+# ============================================================
+
 ATR_PERIOD = 14
 ATR_STOP_MULT = 1.5
-ATR_TAKE_MULT = 2.5
+
+# SIN TAKE PROFIT FIJO
+ATR_TAKE_MULT = None
+
 ATR_TRAILING_MULT = 1.0
 
 MIN_ATR_PCT = 0.003
@@ -66,6 +70,7 @@ COOLDOWN_SECONDS = 60
 
 MIN_SCORE = 3
 MIN_SCORE_GAP = 1
+
 
 # ============================================================
 # VARIABLES
@@ -116,7 +121,7 @@ def log_public_ip():
             timeout=10
         )
         ip = response.json().get("ip", "desconocida")
-        log(f"IP PUBLICA DE SALIDA (para whitelist en Binance): {ip}")
+        log(f"IP PUBLICA DE SALIDA: {ip}")
     except Exception as e:
         log(f"No se pudo obtener la IP publica: {e}")
 
@@ -230,7 +235,8 @@ def signed_request(method, endpoint, params=None):
 
     if response.status_code >= 400:
         raise Exception(
-            f"Binance HTTP {response.status_code}: {response.text}"
+            f"Binance HTTP {response.status_code}: "
+            f"{response.text}"
         )
 
     return response.json()
@@ -248,7 +254,8 @@ def public_request(endpoint, params=None):
 
     if response.status_code >= 400:
         raise Exception(
-            f"Binance HTTP {response.status_code}: {response.text}"
+            f"Binance HTTP {response.status_code}: "
+            f"{response.text}"
         )
 
     return response.json()
@@ -319,7 +326,7 @@ def load_symbol_rules():
     except Exception as e:
 
         log(
-            "No se pudo cargar exchangeInfo, "
+            f"No se pudo cargar exchangeInfo, "
             f"se usan valores por defecto: {e}"
         )
 
@@ -346,7 +353,7 @@ def get_usdt_balance():
 
 
 # ============================================================
-# LEVERAGE Y MARGIN TYPE
+# LEVERAGE
 # ============================================================
 
 def set_leverage():
@@ -378,6 +385,10 @@ def set_leverage():
         return False
 
 
+# ============================================================
+# MARGIN TYPE
+# ============================================================
+
 def set_margin_type():
 
     try:
@@ -392,7 +403,8 @@ def set_margin_type():
         )
 
         log(
-            f"Margin type configurado: {MARGIN_TYPE}"
+            f"Margin type configurado: "
+            f"{MARGIN_TYPE}"
         )
 
     except Exception as e:
@@ -429,15 +441,16 @@ def calculate_atr(
 
     atr = tr.rolling(period).mean()
 
-    return (
-        float(atr.iloc[-1])
-        if not atr.empty
-        else None
+    if atr.empty:
+        return None
+
+    return float(
+        atr.iloc[-1]
     )
 
 
 # ============================================================
-# CANTIDAD
+# MARGEN DINAMICO
 # ============================================================
 
 def calculate_margin_by_volatility(price):
@@ -471,6 +484,10 @@ def calculate_margin_by_volatility(price):
     return margin
 
 
+# ============================================================
+# CANTIDAD
+# ============================================================
+
 def calculate_quantity(price):
 
     balance = get_usdt_balance()
@@ -491,7 +508,10 @@ def calculate_quantity(price):
         balance
     )
 
-    notional = margin * LEVERAGE
+    notional = (
+        margin *
+        LEVERAGE
+    )
 
     if notional < MIN_NOTIONAL:
 
@@ -501,12 +521,17 @@ def calculate_quantity(price):
             f"({MIN_NOTIONAL} USDT)"
         )
 
-    quantity = notional / price
+    quantity = (
+        notional /
+        price
+    )
 
     quantity = (
         math.floor(
-            quantity / QTY_STEP
-        ) * QTY_STEP
+            quantity /
+            QTY_STEP
+        ) *
+        QTY_STEP
     )
 
     if quantity < MIN_QTY:
@@ -536,7 +561,11 @@ def open_position(side):
         now - last_trade_time
         < COOLDOWN_SECONDS
     ):
-        log("Cooldown activo")
+
+        log(
+            "Cooldown activo"
+        )
+
         return
 
     with state_lock:
@@ -552,14 +581,17 @@ def open_position(side):
 
     if current_price is None:
 
-        log("Sin precio todavía")
+        log(
+            "Sin precio todavía"
+        )
+
         return
 
     price = current_price
 
     log(
         f"SEÑAL {side} | "
-        f"Precio={price:.6f}"
+        f"Precio={price:.8f}"
     )
 
     if not LIVE_TRADING:
@@ -595,8 +627,8 @@ def open_position(side):
         )
 
         log(
-            f"ORDEN EJECUTADA: "
-            f"{side} qty={quantity}"
+            f"ORDEN REAL EJECUTADA | "
+            f"{side} | qty={quantity}"
         )
 
         with state_lock:
@@ -604,6 +636,7 @@ def open_position(side):
             position_side = side
             position_qty = quantity
             entry_price = price
+
             highest_price = price
             lowest_price = price
 
@@ -620,7 +653,9 @@ def open_position(side):
 # CERRAR POSICIÓN
 # ============================================================
 
-def close_position(reason="signal"):
+def close_position(
+    reason="signal"
+):
 
     global position_side
     global position_qty
@@ -634,7 +669,10 @@ def close_position(reason="signal"):
         side = position_side
         qty = position_qty
 
-    if side is None or qty <= 0:
+    if (
+        side is None
+        or qty <= 0
+    ):
         return
 
     log(
@@ -672,7 +710,7 @@ def close_position(reason="signal"):
         )
 
         log(
-            "POSICIÓN CERRADA"
+            "POSICIÓN REAL CERRADA"
         )
 
         with state_lock:
@@ -680,6 +718,7 @@ def close_position(reason="signal"):
             position_side = None
             position_qty = 0.0
             entry_price = 0.0
+
             highest_price = 0.0
             lowest_price = 0.0
 
@@ -693,7 +732,7 @@ def close_position(reason="signal"):
 
 
 # ============================================================
-# INDICADORES
+# INDICADORES / SEÑAL
 # ============================================================
 
 def calculate_signal(df):
@@ -838,9 +877,10 @@ def calculate_signal(df):
         short_score += 1
 
     log(
-        f"SIGNAL | price={close:.6f} | "
-        f"EMA9={ema9:.6f} | "
-        f"EMA21={ema21:.6f} | "
+        f"SIGNAL | "
+        f"price={close:.8f} | "
+        f"EMA9={ema9:.8f} | "
+        f"EMA21={ema21:.8f} | "
         f"RSI={rsi:.1f} | "
         f"LONG={long_score} | "
         f"SHORT={short_score}"
@@ -849,17 +889,21 @@ def calculate_signal(df):
     if (
         long_score >= MIN_SCORE
         and
-        long_score - short_score
-        >= MIN_SCORE_GAP
+        long_score -
+        short_score >=
+        MIN_SCORE_GAP
     ):
+
         return "LONG"
 
     if (
         short_score >= MIN_SCORE
         and
-        short_score - long_score
-        >= MIN_SCORE_GAP
+        short_score -
+        long_score >=
+        MIN_SCORE_GAP
     ):
+
         return "SHORT"
 
     return None
@@ -929,7 +973,6 @@ def process_candle():
         return
 
     with state_lock:
-
         current_side = position_side
 
     if current_side is None:
@@ -942,8 +985,7 @@ def process_candle():
 
     if (
         current_side == "LONG"
-        and
-        signal == "SHORT"
+        and signal == "SHORT"
     ):
 
         close_position(
@@ -958,8 +1000,7 @@ def process_candle():
 
     elif (
         current_side == "SHORT"
-        and
-        signal == "LONG"
+        and signal == "LONG"
     ):
 
         close_position(
@@ -974,7 +1015,7 @@ def process_candle():
 
 
 # ============================================================
-# CONTROL DE POSICIÓN
+# GESTIÓN DE BENEFICIO
 # ============================================================
 
 def manage_position():
@@ -985,135 +1026,331 @@ def manage_position():
     with state_lock:
 
         side = position_side
+        qty = position_qty
         entry = entry_price
+        price = current_price
+        atr = current_atr
 
     if (
         side is None
-        or
-        entry <= 0
+        or qty <= 0
+        or entry <= 0
+        or price is None
     ):
+
         return
 
-    price = current_price
+    # --------------------------------------------------------
+    # RIESGO INICIAL CONGELADO
+    # --------------------------------------------------------
 
-    if price is None:
-        return
+    if (
+        not hasattr(
+            manage_position,
+            "risk_entry"
+        )
+        or
+        getattr(
+            manage_position,
+            "risk_entry",
+            0
+        ) != entry
+    ):
 
-    atr = (
-        current_atr
-        if current_atr
-        else
-        entry * 0.01
-    )
+        if atr is None or atr <= 0:
+            return
 
-    stop_distance = (
-        atr *
-        ATR_STOP_MULT
-    )
+        manage_position.risk_entry = entry
 
-    take_distance = (
-        atr *
-        ATR_TAKE_MULT
-    )
+        manage_position.risk_distance = max(
+            atr * ATR_STOP_MULT,
+            entry * 0.003
+        )
 
-    trailing_distance = (
-        atr *
-        ATR_TRAILING_MULT
-    )
+        manage_position.last_stop = None
+        manage_position.last_side = side
+        manage_position.last_log_r = -999.0
+
+        log(
+            f"GESTION R | "
+            f"entry={entry:.8f} | "
+            f"riesgo={manage_position.risk_distance:.8f}"
+        )
+
+    risk = manage_position.risk_distance
+
+    # --------------------------------------------------------
+    # MFE
+    # --------------------------------------------------------
+
+    with state_lock:
+
+        if side == "LONG":
+
+            highest_price = max(
+                highest_price,
+                price
+            )
+
+            mfe_r = (
+                highest_price -
+                entry
+            ) / risk
+
+        else:
+
+            lowest_price = (
+                price
+                if lowest_price == 0
+                else min(
+                    lowest_price,
+                    price
+                )
+            )
+
+            mfe_r = (
+                entry -
+                lowest_price
+            ) / risk
+
+    # --------------------------------------------------------
+    # STOP INICIAL
+    # --------------------------------------------------------
 
     if side == "LONG":
 
-        if highest_price == 0:
-            highest_price = price
-
-        highest_price = max(
-            highest_price,
-            price
-        )
-
         stop_price = (
             entry -
-            stop_distance
+            risk
         )
 
-        take_price = (
-            entry +
-            take_distance
-        )
-
-        trailing_price = (
-            highest_price -
-            trailing_distance
-        )
-
-        if price <= stop_price:
-
-            close_position(
-                "STOP LOSS (ATR)"
-            )
-
-        elif price >= take_price:
-
-            close_position(
-                "TAKE PROFIT (ATR)"
-            )
-
-        elif (
-            highest_price > entry
-            and
-            price <= trailing_price
-        ):
-
-            close_position(
-                "TRAILING STOP (ATR)"
-            )
-
-    elif side == "SHORT":
-
-        if lowest_price == 0:
-            lowest_price = price
-
-        lowest_price = min(
-            lowest_price,
-            price
-        )
+    else:
 
         stop_price = (
             entry +
-            stop_distance
+            risk
         )
 
-        take_price = (
-            entry -
-            take_distance
+    # --------------------------------------------------------
+    # ESCALERA DE PROTECCIÓN
+    #
+    # La idea es:
+    # ganar -> proteger -> dejar correr
+    # --------------------------------------------------------
+
+    steps = [
+
+        (1.0, 0.15),
+
+        (1.5, 0.35),
+
+        (2.0, 0.70),
+
+        (2.5, 1.15),
+
+        (3.0, 1.75),
+
+        (4.0, 2.50),
+
+        (5.0, 3.25),
+
+        (6.0, 4.25),
+
+        (8.0, 5.50),
+
+        (10.0, 7.00)
+    ]
+
+    locked_r = -1e9
+
+    for trigger, lock_r in steps:
+
+        if mfe_r >= trigger:
+
+            locked_r = lock_r
+
+    if locked_r > -1e8:
+
+        if side == "LONG":
+
+            protected = (
+                entry +
+                locked_r *
+                risk
+            )
+
+            stop_price = max(
+                stop_price,
+                protected
+            )
+
+        else:
+
+            protected = (
+                entry -
+                locked_r *
+                risk
+            )
+
+            stop_price = min(
+                stop_price,
+                protected
+            )
+
+    # --------------------------------------------------------
+    # TRAILING AMPLIO
+    # --------------------------------------------------------
+
+    if mfe_r >= 4.0:
+
+        if mfe_r < 6.0:
+
+            trail_r = 2.0
+
+        elif mfe_r < 8.0:
+
+            trail_r = 2.5
+
+        elif mfe_r < 10.0:
+
+            trail_r = 3.0
+
+        else:
+
+            trail_r = 3.5
+
+        if side == "LONG":
+
+            trailing = (
+                highest_price -
+                trail_r *
+                risk
+            )
+
+            stop_price = max(
+                stop_price,
+                trailing
+            )
+
+        else:
+
+            trailing = (
+                lowest_price +
+                trail_r *
+                risk
+            )
+
+            stop_price = min(
+                stop_price,
+                trailing
+            )
+
+    # --------------------------------------------------------
+    # EL STOP NUNCA SE AFLOJA
+    # --------------------------------------------------------
+
+    previous_locked = getattr(
+        manage_position,
+        "last_stop",
+        None
+    )
+
+    previous_side = getattr(
+        manage_position,
+        "last_side",
+        None
+    )
+
+    if (
+        previous_locked is not None
+        and
+        previous_side == side
+        and
+        getattr(
+            manage_position,
+            "risk_entry",
+            0
+        ) == entry
+    ):
+
+        if side == "LONG":
+
+            stop_price = max(
+                stop_price,
+                previous_locked
+            )
+
+        else:
+
+            stop_price = min(
+                stop_price,
+                previous_locked
+            )
+
+    manage_position.last_stop = stop_price
+    manage_position.last_side = side
+
+    # --------------------------------------------------------
+    # STOP TOCADO
+    # --------------------------------------------------------
+
+    if side == "LONG":
+
+        hit_stop = (
+            price <=
+            stop_price
         )
 
-        trailing_price = (
-            lowest_price +
-            trailing_distance
+    else:
+
+        hit_stop = (
+            price >=
+            stop_price
         )
 
-        if price >= stop_price:
+    if hit_stop:
 
-            close_position(
-                "STOP LOSS (ATR)"
-            )
+        close_position(
+            f"PROFIT_STOP | "
+            f"MFE={mfe_r:.2f}R | "
+            f"LOCK={locked_r:.2f}R"
+        )
 
-        elif price <= take_price:
+        manage_position.risk_entry = 0
+        manage_position.last_stop = None
+        manage_position.last_side = None
+        manage_position.last_log_r = -999.0
 
-            close_position(
-                "TAKE PROFIT (ATR)"
-            )
+        return
 
-        elif (
-            lowest_price < entry
-            and
-            price >= trailing_price
-        ):
+    # --------------------------------------------------------
+    # LOG DE GESTIÓN
+    # --------------------------------------------------------
 
-            close_position(
-                "TRAILING STOP (ATR)"
-            )
+    last_log_r = getattr(
+        manage_position,
+        "last_log_r",
+        -999.0
+    )
+
+    if (
+        mfe_r >= 1.0
+        and
+        abs(
+            mfe_r -
+            last_log_r
+        ) >= 0.5
+    ):
+
+        log(
+            f"GESTION | "
+            f"{side} | "
+            f"MFE={mfe_r:.2f}R | "
+            f"STOP={stop_price:.8f} | "
+            f"LOCK={locked_r:.2f}R"
+        )
+
+        manage_position.last_log_r = mfe_r
 
 
 # ============================================================
@@ -1133,15 +1370,12 @@ def on_market_message(
             message
         )
 
-        # Admite raw y combined streams
         data = data.get(
             "data",
             data
         )
 
-        kline = data.get(
-            "k"
-        )
+        kline = data.get("k")
 
         if not kline:
             return
@@ -1153,11 +1387,17 @@ def on_market_message(
         if kline["x"]:
 
             candle = [
+
                 int(kline["t"]),
+
                 float(kline["o"]),
+
                 float(kline["h"]),
+
                 float(kline["l"]),
+
                 float(kline["c"]),
+
                 float(kline["v"])
             ]
 
@@ -1236,10 +1476,15 @@ def market_websocket_loop():
             )
 
             ws = websocket.WebSocketApp(
+
                 MARKET_WS,
+
                 on_open=on_market_open,
+
                 on_message=on_market_message,
+
                 on_error=on_market_error,
+
                 on_close=on_market_close
             )
 
@@ -1286,15 +1531,23 @@ def start_user_data_stream():
     )
 
     request = {
+
         "id": request_id,
-        "method": "userDataStream.start",
+
+        "method":
+            "userDataStream.start",
+
         "params": {
-            "apiKey": API_KEY
+
+            "apiKey":
+                API_KEY
         }
     }
 
     ws.send(
-        json.dumps(request)
+        json.dumps(
+            request
+        )
     )
 
     response = json.loads(
@@ -1331,8 +1584,7 @@ def start_user_data_stream():
     listen_key = key
 
     log(
-        "USER DATA STREAM "
-        "CREADO POR WS API"
+        "USER DATA STREAM CREADO POR WS API"
     )
 
     log(
@@ -1341,6 +1593,10 @@ def start_user_data_stream():
 
     return listen_key
 
+
+# ============================================================
+# KEEPALIVE
+# ============================================================
 
 def user_stream_keepalive_loop():
 
@@ -1357,7 +1613,9 @@ def user_stream_keepalive_loop():
 
             with user_stream_control_lock:
 
-                ws = user_stream_control
+                ws = (
+                    user_stream_control
+                )
 
             if ws is None:
 
@@ -1373,30 +1631,37 @@ def user_stream_keepalive_loop():
             )
 
             request = {
+
                 "id": request_id,
-                "method": "userDataStream.ping",
+
+                "method":
+                    "userDataStream.ping",
+
                 "params": {
-                    "apiKey": API_KEY
+
+                    "apiKey":
+                        API_KEY
                 }
             }
 
             with user_stream_control_lock:
 
                 ws.send(
-                    json.dumps(request)
+                    json.dumps(
+                        request
+                    )
                 )
 
-                ws.settimeout(
-                    15
-                )
+                ws.settimeout(15)
 
                 response = json.loads(
                     ws.recv()
                 )
 
-            if response.get(
-                "status"
-            ) == 200:
+            if (
+                response.get("status")
+                == 200
+            ):
 
                 new_key = (
                     response
@@ -1431,6 +1696,7 @@ def user_stream_keepalive_loop():
                 try:
 
                     if user_stream_control:
+
                         user_stream_control.close()
 
                 except:
@@ -1438,6 +1704,10 @@ def user_stream_keepalive_loop():
 
                 user_stream_control = None
 
+
+# ============================================================
+# ACCOUNT UPDATE
+# ============================================================
 
 def process_account_update(data):
 
@@ -1463,17 +1733,11 @@ def process_account_update(data):
             continue
 
         amt = float(
-            p.get(
-                "pa",
-                0
-            )
+            p.get("pa", 0)
         )
 
         entry = float(
-            p.get(
-                "ep",
-                0
-            )
+            p.get("ep", 0)
         )
 
         with state_lock:
@@ -1481,13 +1745,17 @@ def process_account_update(data):
             if amt > 0:
 
                 position_side = "LONG"
+
                 position_qty = amt
+
                 entry_price = entry
 
                 if highest_price == 0:
+
                     highest_price = entry
 
                 if lowest_price == 0:
+
                     lowest_price = entry
 
                 log(
@@ -1499,13 +1767,17 @@ def process_account_update(data):
             elif amt < 0:
 
                 position_side = "SHORT"
+
                 position_qty = abs(amt)
+
                 entry_price = entry
 
                 if highest_price == 0:
+
                     highest_price = entry
 
                 if lowest_price == 0:
+
                     lowest_price = entry
 
                 log(
@@ -1517,9 +1789,13 @@ def process_account_update(data):
             else:
 
                 position_side = None
+
                 position_qty = 0.0
+
                 entry_price = 0.0
+
                 highest_price = 0.0
+
                 lowest_price = 0.0
 
                 log(
@@ -1527,6 +1803,10 @@ def process_account_update(data):
                     "posición cerrada"
                 )
 
+
+# ============================================================
+# ORDER UPDATE
+# ============================================================
 
 def process_order_update(data):
 
@@ -1538,13 +1818,9 @@ def process_order_update(data):
     if order.get("s") != SYMBOL:
         return
 
-    status = order.get(
-        "X"
-    )
+    status = order.get("X")
 
-    side = order.get(
-        "S"
-    )
+    side = order.get("S")
 
     executed_qty = order.get(
         "z",
@@ -1565,6 +1841,10 @@ def process_order_update(data):
             f"avg={avg_price}"
         )
 
+
+# ============================================================
+# USER WS MENSAJE
+# ============================================================
 
 def on_user_message(
     ws,
@@ -1635,6 +1915,10 @@ def on_user_open(ws):
     )
 
 
+# ============================================================
+# USER DATA LOOP
+# ============================================================
+
 def user_websocket_loop():
 
     global listen_key
@@ -1660,8 +1944,7 @@ def user_websocket_loop():
             if USE_TESTNET:
 
                 ws_url = (
-                    "wss://stream.binancefuture.com/"
-                    "ws/"
+                    "wss://stream.binancefuture.com/ws/"
                     + key
                 )
 
@@ -1670,10 +1953,15 @@ def user_websocket_loop():
             )
 
             stream_ws = websocket.WebSocketApp(
+
                 ws_url,
+
                 on_open=on_user_open,
+
                 on_message=on_user_message,
+
                 on_error=on_user_error,
+
                 on_close=on_user_close
             )
 
@@ -1693,6 +1981,7 @@ def user_websocket_loop():
             try:
 
                 if stream_ws:
+
                     stream_ws.close()
 
             except:
@@ -1703,6 +1992,7 @@ def user_websocket_loop():
             try:
 
                 if user_stream_control:
+
                     user_stream_control.close()
 
             except:
@@ -1719,7 +2009,7 @@ def user_websocket_loop():
 
 
 # ============================================================
-# POSITION MANAGER
+# POSITION MANAGER LOOP
 # ============================================================
 
 def position_manager_loop():
@@ -1783,13 +2073,16 @@ def health_server():
     )
 
     server = HTTPServer(
-        ("0.0.0.0", port),
+        (
+            "0.0.0.0",
+            port
+        ),
         HealthHandler
     )
 
     log(
-        f"Health server escuchando "
-        f"en puerto {port}"
+        f"Health server "
+        f"escuchando en puerto {port}"
     )
 
     server.serve_forever()
@@ -1806,7 +2099,7 @@ def main():
     )
 
     log(
-        "      ONGUSDT FUTURES BOT"
+        "      ONGUSDT FUTURES BOT REAL"
     )
 
     log(
@@ -1816,13 +2109,11 @@ def main():
     log_public_ip()
 
     log(
-        f"USE_TESTNET = "
-        f"{USE_TESTNET}"
+        f"USE_TESTNET = {USE_TESTNET}"
     )
 
     log(
-        f"LIVE_TRADING = "
-        f"{LIVE_TRADING}"
+        f"LIVE_TRADING = {LIVE_TRADING}"
     )
 
     log(
@@ -1834,15 +2125,12 @@ def main():
     )
 
     log(
-        f"LEVERAGE = "
-        f"{LEVERAGE}x"
+        f"LEVERAGE = {LEVERAGE}x"
     )
 
     log(
-        f"ATR_STOP_MULT = "
-        f"{ATR_STOP_MULT} | "
-        f"ATR_TAKE_MULT = "
-        f"{ATR_TAKE_MULT}"
+        "TP FIJO = DESACTIVADO | "
+        "GESTION POR R"
     )
 
     log(
@@ -1851,8 +2139,7 @@ def main():
     )
 
     log(
-        f"MIN_SCORE = "
-        f"{MIN_SCORE}"
+        f"MIN_SCORE = {MIN_SCORE}"
     )
 
     log(
@@ -1869,8 +2156,7 @@ def main():
         )
 
     log(
-        "Cargando reglas del símbolo "
-        "(exchangeInfo)..."
+        "Cargando reglas del símbolo..."
     )
 
     load_symbol_rules()
@@ -1916,6 +2202,10 @@ def main():
     )
 
     log(
+        "MODO REAL ACTIVADO"
+    )
+
+    log(
         "Esperando datos de mercado..."
     )
 
@@ -1930,6 +2220,10 @@ def main():
             f"qty={position_qty}"
         )
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
 
