@@ -17,9 +17,12 @@ from datetime import datetime, timezone
 
 
 # ============================================================
-# UNIVERSAL BINANCE FUTURES BOT V3 - CORREGIDO
+# UNIVERSAL BINANCE FUTURES BOT V3 - CORREGIDO REAL
 #
-# CAMBIOS PRINCIPALES:
+# ESTRATEGIA ORIGINAL CONSERVADA
+#
+# CAMBIOS / CORRECCIONES:
+# - LIVE TRADING REAL
 # - Riesgo real por trade
 # - Apalancamiento configurable
 # - Reglas reales por símbolo
@@ -31,6 +34,9 @@ from datetime import datetime, timezone
 # - Sincronización de posiciones
 # - WS para trading
 # - REST únicamente para metadata / klines / leverage
+# - Lock correcto para WS API
+# - Cierre seguro de posiciones
+# - No se elimina el STOP antes de confirmar el cierre
 # ============================================================
 
 
@@ -38,13 +44,8 @@ from datetime import datetime, timezone
 # CONFIGURACION PRINCIPAL
 # ============================================================
 
-# IMPORTANTE:
-# Arranca en FALSE.
-# Cuando hayas comprobado que todo funciona correctamente:
-#
-# LIVE_TRADING = True
-#
-LIVE_TRADING = False
+# !!! TRADING REAL !!!
+LIVE_TRADING = True
 
 USE_TESTNET = False
 
@@ -54,15 +55,18 @@ MAX_POSITIONS = 4
 
 START_BALANCE = 100.0
 
+# Riesgo máximo teórico por operación
 RISK_PER_TRADE = 0.01
 
+# Apalancamiento
 LEVERAGE = 6
 
-# Por seguridad no utilizamos todo el margen disponible.
+# No utilizar más del 80% del balance disponible
+# como margen total permitido.
 MAX_MARGIN_USAGE = 0.80
 
-# Nunca permitir que el riesgo teórico de la posición
-# supere este multiplicador del riesgo calculado.
+# El riesgo real nunca puede superar este multiplicador
+# del riesgo calculado.
 MAX_RISK_MULTIPLIER = 1.00
 
 ATR_PERIOD = 14
@@ -123,7 +127,7 @@ if USE_TESTNET:
     REST_BASE = "https://testnet.binancefuture.com"
 
     MARKET_WS_BASE = (
-        "wss://stream.binancefuture.com/ws/"
+        "wss://stream.binancefuture.com/market/ws/"
     )
 
     WS_API_URL = (
@@ -184,7 +188,7 @@ SYMBOLS = [
 
 
 # ============================================================
-# ESTADO
+# ESTADO GLOBAL
 # ============================================================
 
 market_data = {}
@@ -201,7 +205,13 @@ state_lock = threading.RLock()
 
 order_lock = threading.Lock()
 
+# Lock para impedir respuestas cruzadas
+# en el WS API.
 ws_request_lock = threading.Lock()
+
+# IMPORTANTE:
+# Este lock faltaba en el código anterior.
+user_stream_control_lock = threading.RLock()
 
 user_stream_control = None
 
@@ -209,7 +219,7 @@ listen_key = None
 
 
 # ============================================================
-# CREAR ESTADO
+# CREAR ESTADO DE CADA SIMBOLO
 # ============================================================
 
 def create_symbol_state():
@@ -348,7 +358,7 @@ def rest_request(
 
 
 # ============================================================
-# CARGAR REGLAS REALES
+# CARGAR REGLAS REALES DE BINANCE
 # ============================================================
 
 def load_symbol_rules():
@@ -438,6 +448,7 @@ def load_symbol_rules():
                     0
                 )
             )
+        )
 
         min_notional = float(
             min_notional_filter.get(
@@ -503,28 +514,7 @@ def load_symbol_rules():
 
 
 # ============================================================
-# PRECISION
-# ============================================================
-
-def decimals_from_step(step):
-
-    if step >= 1:
-
-        return 0
-
-    text = f"{step:.12f}".rstrip("0")
-
-    if "." not in text:
-
-        return 0
-
-    return len(
-        text.split(".")[1]
-    )
-
-
-# ============================================================
-# REDONDEAR CANTIDAD HACIA ABAJO
+# REDONDEAR HACIA ABAJO SEGUN STEP
 # ============================================================
 
 def floor_to_step(
@@ -558,7 +548,7 @@ def floor_to_step(
 
 
 # ============================================================
-# REDONDEAR PRECIO
+# REDONDEAR PRECIO SEGUN TICK
 # ============================================================
 
 def floor_price(
@@ -592,11 +582,10 @@ def floor_price(
 # ============================================================
 # NORMALIZAR CANTIDAD
 #
-# IMPORTANTE:
 # NO fuerza minQty.
 #
-# Si minQty hace que el riesgo supere el 1%,
-# la operación se rechaza.
+# Si el mínimo de Binance hace que el riesgo
+# supere el riesgo permitido, NO OPERA.
 # ============================================================
 
 def normalize_quantity(
@@ -779,6 +768,8 @@ def calculate_atr(
 
 # ============================================================
 # INDICADORES
+#
+# ESTRATEGIA ORIGINAL
 # ============================================================
 
 def calculate_indicators(df):
@@ -842,6 +833,7 @@ def calculate_indicators(df):
         20
     ).mean()
 
+    # ATR original
     df["atr"] = calculate_atr(
         df
     )
@@ -851,6 +843,8 @@ def calculate_indicators(df):
 
 # ============================================================
 # SEÑAL
+#
+# ESTRATEGIA ORIGINAL SIN CAMBIOS
 # ============================================================
 
 def calculate_signal(
@@ -937,6 +931,10 @@ def calculate_signal(
         previous["close"]
     )
 
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
+
     long_score = 0
 
     if ema9 > ema21:
@@ -962,6 +960,10 @@ def calculate_signal(
     if close > previous_close:
 
         long_score += 1
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
 
     short_score = 0
 
@@ -1018,7 +1020,7 @@ def calculate_signal(
 
 
 # ============================================================
-# WS API
+# WS SIGNATURE
 # ============================================================
 
 def _ws_signature(params):
@@ -1036,6 +1038,13 @@ def _ws_signature(params):
         hashlib.sha256
     ).hexdigest()
 
+
+# ============================================================
+# WS API REQUEST
+#
+# UN SOLO REQUEST A LA VEZ
+# para evitar respuestas cruzadas.
+# ============================================================
 
 def ws_api_request(
     method,
@@ -1110,19 +1119,43 @@ def ws_api_request(
             )
         )
 
-        while True:
+        deadline = time.time() + timeout
+
+        response = None
+
+        while time.time() < deadline:
 
             raw = ws.recv()
+
+            if not raw:
+
+                continue
 
             response = json.loads(
                 raw
             )
 
+            # Puede haber mensajes que no correspondan
+            # al request actual.
             if response.get(
                 "id"
             ) == request_id:
 
                 break
+
+        if response is None:
+
+            raise Exception(
+                f"Timeout esperando respuesta de {method}"
+            )
+
+        if response.get(
+            "id"
+        ) != request_id:
+
+            raise Exception(
+                f"Respuesta WS incorrecta: {response}"
+            )
 
     if response.get(
         "status"
@@ -1176,7 +1209,7 @@ def get_usdt_balance():
 
 
 # ============================================================
-# MARGEN DISPONIBLE
+# MAXIMA CANTIDAD POR MARGEN
 # ============================================================
 
 def calculate_max_quantity_by_margin(
@@ -1212,13 +1245,12 @@ def calculate_max_quantity_by_margin(
 # ============================================================
 # CALCULO DE POSICION
 #
-# RIESGO = balance * 1%
+# Riesgo = balance * 1%
 #
 # quantity = riesgo / distancia_stop
 #
-# El leverage NO multiplica el riesgo.
-#
-# Luego limitamos por margen.
+# IMPORTANTE:
+# El leverage NO multiplica el riesgo teorico.
 # ============================================================
 
 def calculate_position_size(
@@ -1290,7 +1322,8 @@ def calculate_position_size(
             f"{symbol} | "
             f"NO TRADE: capital demasiado pequeño "
             f"para cumplir reglas sin superar "
-            f"el riesgo del {RISK_PER_TRADE * 100:.2f}% | "
+            f"el riesgo del "
+            f"{RISK_PER_TRADE * 100:.2f}% | "
             f"balance={balance:.4f} | "
             f"riesgo=${risk_money:.4f} | "
             f"minQty={min_qty} | "
@@ -1362,7 +1395,7 @@ def calculate_position_size(
 
 
 # ============================================================
-# STOP PRICE
+# NORMALIZAR STOP
 # ============================================================
 
 def normalize_stop_price(
@@ -1394,7 +1427,10 @@ def normalize_stop_price(
 
 
 # ============================================================
-# STOP REAL
+# COLOCAR STOP REAL
+#
+# Futures USD-M usa actualmente algoOrder para
+# las órdenes condicionales.
 # ============================================================
 
 def place_exchange_stop(
@@ -1445,7 +1481,7 @@ def cancel_order(
 
     if not order_id:
 
-        return
+        return True
 
     try:
 
@@ -1460,17 +1496,27 @@ def cancel_order(
             signed=True
         )
 
+        log(
+            f"{symbol} | "
+            f"STOP CANCELADO | "
+            f"algoId={order_id}"
+        )
+
+        return True
+
     except Exception as e:
 
         log(
             f"{symbol} | "
-            f"Error cancelando STOP "
+            f"ERROR cancelando STOP "
             f"{order_id}: {e}"
         )
 
+        return False
+
 
 # ============================================================
-# ACTUALIZAR STOP
+# ACTUALIZAR STOP REAL
 # ============================================================
 
 def update_exchange_stop(
@@ -1509,12 +1555,12 @@ def update_exchange_stop(
 
         return True
 
-    if old_id:
-
-        cancel_order(
-            symbol,
-            old_id
-        )
+    # --------------------------------------------------------
+    # Primero intentamos colocar el nuevo STOP.
+    # Solo después cancelamos el anterior.
+    # Así evitamos quedar sin protección durante
+    # la actualización.
+    # --------------------------------------------------------
 
     try:
 
@@ -1537,6 +1583,8 @@ def update_exchange_stop(
                 f"{result}"
             )
 
+        old_id_to_cancel = old_id
+
         position[
             "stop_order_id"
         ] = algo_id
@@ -1552,22 +1600,35 @@ def update_exchange_stop(
             f"algoId={algo_id}"
         )
 
+        # Cancelamos el anterior después
+        # de tener el nuevo activo.
+        if old_id_to_cancel:
+
+            cancel_order(
+                symbol,
+                old_id_to_cancel
+            )
+
         return True
 
     except Exception as e:
-
-        position[
-            "stop_order_id"
-        ] = None
-
-        position[
-            "exchange_stop_price"
-        ] = None
 
         log(
             f"{symbol} | "
             f"ERROR STOP REAL: {e}"
         )
+
+        # Si no había stop anterior, dejamos
+        # el estado vacío.
+        if not old_id:
+
+            position[
+                "stop_order_id"
+            ] = None
+
+            position[
+                "exchange_stop_price"
+            ] = None
 
         return False
 
@@ -1637,7 +1698,7 @@ def open_position(
         )
 
         # ----------------------------------------------------
-        # TEST MODE
+        # TEST
         # ----------------------------------------------------
 
         if not LIVE_TRADING:
@@ -1782,6 +1843,9 @@ def open_position(
                     f"no pudo colocarse."
                 )
 
+                # Cierre de emergencia.
+                # close_position intentará cerrar
+                # aunque no haya stop.
                 try:
 
                     close_position(
@@ -1812,6 +1876,12 @@ def open_position(
 
 # ============================================================
 # CERRAR POSICION
+#
+# CORRECCION IMPORTANTE:
+# Primero ejecuta el cierre.
+# Después cancela el STOP.
+#
+# El código anterior cancelaba primero el STOP.
 # ============================================================
 
 def close_position(
@@ -1846,13 +1916,6 @@ def close_position(
 
             stop_order_id = position.get(
                 "stop_order_id"
-            )
-
-        if stop_order_id:
-
-            cancel_order(
-                symbol,
-                stop_order_id
             )
 
         close_side = (
@@ -1922,6 +1985,9 @@ def close_position(
 
             except Exception as e:
 
+                # MUY IMPORTANTE:
+                # Si el cierre falla, NO quitamos la
+                # posicion interna ni eliminamos el STOP.
                 log(
                     f"{symbol} | "
                     f"ERROR CERRANDO POSICION: {e}"
@@ -1971,6 +2037,18 @@ def close_position(
         else:
 
             r_multiple = 0.0
+
+        # ----------------------------------------------------
+        # AHORA QUE EL CIERRE SE EJECUTO,
+        # CANCELAMOS EL STOP RESTANTE.
+        # ----------------------------------------------------
+
+        if LIVE_TRADING and stop_order_id:
+
+            cancel_order(
+                symbol,
+                stop_order_id
+            )
 
         with state_lock:
 
@@ -2075,6 +2153,11 @@ def manage_position(
         "stop"
     ]
 
+    # --------------------------------------------------------
+    # PROTECCIONES DE GANANCIA
+    # SIN CAMBIOS
+    # --------------------------------------------------------
+
     for trigger_r, protect_r in PROTECTION_LEVELS:
 
         if mfe >= trigger_r:
@@ -2102,6 +2185,11 @@ def manage_position(
                 if candidate < new_stop:
 
                     new_stop = candidate
+
+    # --------------------------------------------------------
+    # TRAILING
+    # SIN CAMBIOS
+    # --------------------------------------------------------
 
     for trigger_r, gap_r in TRAILING_LEVELS:
 
@@ -2171,6 +2259,10 @@ def manage_position(
             "mfe_r"
         ]
 
+    # --------------------------------------------------------
+    # ACTUALIZAR STOP REAL
+    # --------------------------------------------------------
+
     if abs(
         stop - old_stop
     ) > max(
@@ -2235,7 +2327,7 @@ def manage_position(
 
 
 # ============================================================
-# PROCESAR VELA
+# PROCESAR VELA CERRADA
 # ============================================================
 
 def process_candle(
@@ -2308,6 +2400,10 @@ def process_candle(
             symbol
         ]["price"]
 
+    # --------------------------------------------------------
+    # SI YA HAY POSICION
+    # --------------------------------------------------------
+
     if existing is not None:
 
         if existing[
@@ -2324,9 +2420,17 @@ def process_candle(
 
         return
 
+    # --------------------------------------------------------
+    # LIMITE GLOBAL
+    # --------------------------------------------------------
+
     if total_positions >= MAX_POSITIONS:
 
         return
+
+    # --------------------------------------------------------
+    # ENTRADA
+    # --------------------------------------------------------
 
     open_position(
         symbol,
@@ -2375,10 +2479,8 @@ def load_initial_candles():
 
             if candles:
 
-                # La última vela puede estar abierta.
-                # La dejamos afuera para señales.
-                current_open = candles[-1][0]
-
+                # La última vela está abierta.
+                # Se excluye del historial para señales.
                 with state_lock:
 
                     market_data[
@@ -2446,11 +2548,19 @@ def on_market_message(
                 symbol
             ]["price"] = price
 
-        # Vela todavía abierta:
-        # actualizamos precio pero NO generamos señal.
+        # ----------------------------------------------------
+        # VELA ABIERTA
+        # Solo actualizamos precio.
+        # NO señal.
+        # ----------------------------------------------------
+
         if not kline["x"]:
 
             return
+
+        # ----------------------------------------------------
+        # VELA CERRADA
+        # ----------------------------------------------------
 
         candle = [
             int(kline["t"]),
@@ -2560,7 +2670,7 @@ def make_market_close(
 
 
 # ============================================================
-# MARKET WS
+# MARKET WS LOOP
 # ============================================================
 
 def market_websocket_loop(
@@ -2619,7 +2729,7 @@ def market_websocket_loop(
 
 
 # ============================================================
-# USER DATA STREAM
+# USER DATA STREAM / WS API
 # ============================================================
 
 def start_user_data_stream():
@@ -2654,9 +2764,32 @@ def start_user_data_stream():
         )
     )
 
-    response = json.loads(
-        ws.recv()
-    )
+    deadline = time.time() + 15
+
+    response = None
+
+    while time.time() < deadline:
+
+        response = json.loads(
+            ws.recv()
+        )
+
+        if response.get(
+            "id"
+        ) == request_id:
+
+            break
+
+    if (
+        response is None
+        or response.get("id") != request_id
+    ):
+
+        ws.close()
+
+        raise Exception(
+            "Timeout iniciando userDataStream"
+        )
 
     if response.get(
         "status"
@@ -2775,6 +2908,10 @@ def sync_account_positions(
 
             continue
 
+        # ----------------------------------------------------
+        # POSICION CERRADA
+        # ----------------------------------------------------
+
         if amount == 0:
 
             with state_lock:
@@ -2783,6 +2920,11 @@ def sync_account_positions(
                     symbol,
                     None
                 )
+
+            log(
+                f"ACCOUNT SYNC | "
+                f"{symbol} | POSICION CERRADA"
+            )
 
             continue
 
@@ -2949,6 +3091,14 @@ def on_user_message(
                 "LISTEN KEY EXPIRADO"
             )
 
+            try:
+
+                ws.close()
+
+            except Exception:
+
+                pass
+
         elif event_type == "ACCOUNT_UPDATE":
 
             sync_account_positions(
@@ -2972,6 +3122,13 @@ def on_user_message(
                 f"side={order.get('S')} | "
                 f"status={order.get('X')} | "
                 f"exec={order.get('x')}"
+            )
+
+        elif event_type == "ALGO_UPDATE":
+
+            log(
+                f"ALGO UPDATE | "
+                f"{data}"
             )
 
     except Exception as e:
@@ -3001,7 +3158,7 @@ def user_websocket_loop():
             if USE_TESTNET:
 
                 ws_url = (
-                    "wss://stream.binancefuture.com/ws/"
+                    "wss://stream.binancefuture.com/private/ws/"
                     + key
                 )
 
@@ -3065,6 +3222,8 @@ def user_websocket_loop():
 
                 user_stream_control = None
 
+                listen_key = None
+
         log(
             "Reconectando User Data en "
             f"{RECONNECT_SECONDS}s..."
@@ -3084,6 +3243,8 @@ def user_stream_keepalive_loop():
     global user_stream_control
     global listen_key
 
+    # Binance indica que el stream dura 60 min.
+    # Lo renovamos cada 30 min.
     while True:
 
         time.sleep(
@@ -3132,7 +3293,11 @@ def user_stream_keepalive_loop():
                         15
                     )
 
-                    while True:
+                    deadline = time.time() + 15
+
+                    response = None
+
+                    while time.time() < deadline:
 
                         response = json.loads(
                             ws.recv()
@@ -3143,6 +3308,16 @@ def user_stream_keepalive_loop():
                         ) == request_id:
 
                             break
+
+                    if (
+                        response is None
+                        or response.get("id")
+                        != request_id
+                    ):
+
+                        raise Exception(
+                            "Timeout en keepalive"
+                        )
 
             if response.get(
                 "status"
@@ -3193,6 +3368,8 @@ def user_stream_keepalive_loop():
                     pass
 
                 user_stream_control = None
+
+                listen_key = None
 
 
 # ============================================================
@@ -3362,7 +3539,7 @@ def main():
     )
 
     log(
-        "     RISK / LEVERAGE CORRECTED"
+        "     CORREGIDO - REAL TRADING"
     )
 
     log(
@@ -3417,7 +3594,7 @@ def main():
         return
 
     # --------------------------------------------------------
-    # HEALTH
+    # HEALTH SERVER
     # --------------------------------------------------------
 
     threading.Thread(
@@ -3529,6 +3706,18 @@ def main():
     log(
         f"TRADING = "
         f"{'REAL' if LIVE_TRADING else 'TEST'}"
+    )
+
+    log(
+        f"LEVERAGE = x{LEVERAGE}"
+    )
+
+    log(
+        f"RISK = {RISK_PER_TRADE * 100:.2f}%"
+    )
+
+    log(
+        "STOP REAL = ACTIVO"
     )
 
     log(
