@@ -17,69 +17,138 @@ from datetime import datetime, timezone
 
 
 # ============================================================
-# UNIVERSAL BINANCE FUTURES BOT V3 - CORREGIDO REAL
+# UNIVERSAL BINANCE FUTURES BOT V4 TEST
 #
-# ESTRATEGIA ORIGINAL CONSERVADA
+# BASE:
+# - MISMA CONEXION DEL V3 DEL USUARIO
+# - MARKET WEBSOCKET
+# - WS API BINANCE
+# - USER DATA STREAM
+# - REST SOLO PARA METADATA / KLINES / LEVERAGE
 #
-# CAMBIOS / CORRECCIONES:
-# - LIVE TRADING REAL
-# - Riesgo real por trade
-# - Apalancamiento configurable
-# - Reglas reales por símbolo
-# - stepSize / minQty / maxQty / minNotional / tickSize
-# - Margen máximo
-# - Carga inicial de velas
-# - Stop real obligatorio
-# - Sin duplicación de entradas
-# - Sincronización de posiciones
-# - WS para trading
-# - REST únicamente para metadata / klines / leverage
-# - Lock correcto para WS API
-# - Cierre seguro de posiciones
-# - No se elimina el STOP antes de confirmar el cierre
+# ESTRATEGIA:
+# - FReinforcedStrategy
+# - EMA SHORT / EMA LONG
+# - SMA 50 EN TIMEFRAME SUPERIOR
+# - LONG + SHORT
+#
+# TEST:
+# - NO ENVIA ORDENES REALES
+# - SIMULA BALANCE
+# - SIMULA COMISION
+# - SIMULA SLIPPAGE
+# - RESPETA MIN QTY / STEP / MIN NOTIONAL
+#
+# APALANCAMIENTO:
+# - x6
+#
+# IMPORTANTE:
+# LIVE_TRADING DEBE QUEDAR EN FALSE
+# HASTA TERMINAR LAS PRUEBAS.
 # ============================================================
 
 
 # ============================================================
-# CONFIGURACION PRINCIPAL
+# CONFIGURACION
 # ============================================================
 
-# !!! TRADING REAL !!!
-LIVE_TRADING = True
+LIVE_TRADING = False
 
 USE_TESTNET = False
 
 INTERVAL = "5m"
 
-MAX_POSITIONS = 4
-
-START_BALANCE = 100.0
-
-# Riesgo máximo teórico por operación
-RISK_PER_TRADE = 0.01
-
-# Apalancamiento
 LEVERAGE = 6
 
-# No utilizar más del 80% del balance disponible
-# como margen total permitido.
+# ------------------------------------------------------------
+# CAPITAL DE TEST
+#
+# CAMBIALO AL CAPITAL QUE QUIERAS SIMULAR.
+#
+# EJEMPLO:
+# 10 USDT = aproximadamente una cuenta muy pequeña.
+# ------------------------------------------------------------
+
+START_BALANCE = 10.0
+
+# ------------------------------------------------------------
+# RIESGO
+#
+# 1% del balance por operacion.
+# ------------------------------------------------------------
+
+RISK_PER_TRADE = 0.01
+
+# ------------------------------------------------------------
+# MARGEN MAXIMO
+# ------------------------------------------------------------
+
 MAX_MARGIN_USAGE = 0.80
 
-# El riesgo real nunca puede superar este multiplicador
-# del riesgo calculado.
-MAX_RISK_MULTIPLIER = 1.00
+# ------------------------------------------------------------
+# POSICIONES
+#
+# Para capital pequeño:
+# una sola posicion.
+# ------------------------------------------------------------
+
+MAX_POSITIONS = 1
+
+# ------------------------------------------------------------
+# STOP
+#
+# La estrategia FReinforced NO trae un ATR stop.
+# Para este bot usamos ATR para proteccion de riesgo.
+# ------------------------------------------------------------
 
 ATR_PERIOD = 14
 
-ATR_STOP_MULT = 1.7
+ATR_STOP_MULT = 1.70
 
-MIN_CANDLES = 40
+# ------------------------------------------------------------
+# CANTIDAD DE VELAS
+#
+# FReinforced usa timeframe superior:
+# 5m x 12 = 60m
+#
+# SMA 50 de 60m necesita aproximadamente
+# 600 velas de 5m.
+# ------------------------------------------------------------
 
-INITIAL_CANDLES = 200
+MIN_CANDLES = 650
+
+INITIAL_CANDLES = 750
+
+# ------------------------------------------------------------
+# RECONEXION
+# ------------------------------------------------------------
 
 RECONNECT_SECONDS = 10
 
 REST_TIMEOUT = 15
+
+
+# ============================================================
+# SIMULACION
+# ============================================================
+
+# ------------------------------------------------------------
+# COMISION ESTIMADA
+#
+# Se aplica tanto entrada como salida.
+#
+# Esto es una aproximacion de TEST.
+# ------------------------------------------------------------
+
+TAKER_FEE = 0.0005
+
+# ------------------------------------------------------------
+# SLIPPAGE
+#
+# 0.05% por ejecucion.
+# ------------------------------------------------------------
+
+SLIPPAGE = 0.0005
 
 
 # ============================================================
@@ -117,14 +186,20 @@ TIME_STOP_MIN_MFE_R = 0.50
 # API
 # ============================================================
 
-API_KEY = os.getenv("BINANCE_API_KEY")
+API_KEY = os.getenv(
+    "BINANCE_API_KEY"
+)
 
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+API_SECRET = os.getenv(
+    "BINANCE_API_SECRET"
+)
 
 
 if USE_TESTNET:
 
-    REST_BASE = "https://testnet.binancefuture.com"
+    REST_BASE = (
+        "https://testnet.binancefuture.com"
+    )
 
     MARKET_WS_BASE = (
         "wss://stream.binancefuture.com/market/ws/"
@@ -137,7 +212,9 @@ if USE_TESTNET:
 
 else:
 
-    REST_BASE = "https://fapi.binance.com"
+    REST_BASE = (
+        "https://fapi.binance.com"
+    )
 
     MARKET_WS_BASE = (
         "wss://fstream.binance.com/market/ws/"
@@ -201,16 +278,14 @@ trade_history = []
 
 paper_balance = START_BALANCE
 
+paper_initial_balance = START_BALANCE
+
 state_lock = threading.RLock()
 
 order_lock = threading.Lock()
 
-# Lock para impedir respuestas cruzadas
-# en el WS API.
 ws_request_lock = threading.Lock()
 
-# IMPORTANTE:
-# Este lock faltaba en el código anterior.
 user_stream_control_lock = threading.RLock()
 
 user_stream_control = None
@@ -219,7 +294,7 @@ listen_key = None
 
 
 # ============================================================
-# CREAR ESTADO DE CADA SIMBOLO
+# ESTADO DE SIMBOLOS
 # ============================================================
 
 def create_symbol_state():
@@ -235,7 +310,9 @@ def create_symbol_state():
 
 for symbol in SYMBOLS:
 
-    market_data[symbol] = create_symbol_state()
+    market_data[symbol] = (
+        create_symbol_state()
+    )
 
 
 # ============================================================
@@ -288,7 +365,8 @@ def rest_request(
     if not API_KEY or not API_SECRET:
 
         raise Exception(
-            "Faltan BINANCE_API_KEY o BINANCE_API_SECRET"
+            "Faltan BINANCE_API_KEY "
+            "o BINANCE_API_SECRET"
         )
 
     params = dict(
@@ -303,8 +381,8 @@ def rest_request(
 
         params["recvWindow"] = 5000
 
-        params["signature"] = rest_signature(
-            params
+        params["signature"] = (
+            rest_signature(params)
         )
 
     headers = {
@@ -343,7 +421,8 @@ def rest_request(
     else:
 
         raise Exception(
-            f"Metodo REST no soportado: {method}"
+            f"Metodo REST no soportado: "
+            f"{method}"
         )
 
     if response.status_code >= 400:
@@ -358,7 +437,7 @@ def rest_request(
 
 
 # ============================================================
-# CARGAR REGLAS REALES DE BINANCE
+# REGLAS BINANCE
 # ============================================================
 
 def load_symbol_rules():
@@ -389,6 +468,17 @@ def load_symbol_rules():
 
             continue
 
+        if item.get(
+            "status"
+        ) != "TRADING":
+
+            log(
+                f"{symbol} | "
+                f"NO TRADING - omitido"
+            )
+
+            continue
+
         filters = {
             x.get("filterType"): x
             for x in item.get(
@@ -412,11 +502,13 @@ def load_symbol_rules():
             {}
         )
 
-        min_notional_filter = filters.get(
-            "MIN_NOTIONAL",
+        min_notional_filter = (
             filters.get(
-                "NOTIONAL",
-                {}
+                "MIN_NOTIONAL",
+                filters.get(
+                    "NOTIONAL",
+                    {}
+                )
             )
         )
 
@@ -495,18 +587,6 @@ def load_symbol_rules():
 
     symbol_rules = rules
 
-    missing = [
-        x for x in SYMBOLS
-        if x not in symbol_rules
-    ]
-
-    if missing:
-
-        log(
-            "ADVERTENCIA: símbolos sin reglas: "
-            + ", ".join(missing)
-        )
-
     log(
         f"REGLAS CARGADAS: "
         f"{len(symbol_rules)}/{len(SYMBOLS)}"
@@ -514,7 +594,7 @@ def load_symbol_rules():
 
 
 # ============================================================
-# REDONDEAR HACIA ABAJO SEGUN STEP
+# REDONDEO CANTIDAD
 # ============================================================
 
 def floor_to_step(
@@ -540,15 +620,13 @@ def floor_to_step(
         rounding=ROUND_DOWN
     )
 
-    result = (
+    return float(
         units * step_dec
     )
 
-    return float(result)
-
 
 # ============================================================
-# REDONDEAR PRECIO SEGUN TICK
+# REDONDEO PRECIO
 # ============================================================
 
 def floor_price(
@@ -581,11 +659,6 @@ def floor_price(
 
 # ============================================================
 # NORMALIZAR CANTIDAD
-#
-# NO fuerza minQty.
-#
-# Si el mínimo de Binance hace que el riesgo
-# supere el riesgo permitido, NO OPERA.
 # ============================================================
 
 def normalize_quantity(
@@ -608,7 +681,9 @@ def normalize_quantity(
 
     max_qty = rule["max_qty"]
 
-    min_notional = rule["min_notional"]
+    min_notional = rule[
+        "min_notional"
+    ]
 
     quantity = floor_to_step(
         quantity,
@@ -635,17 +710,19 @@ def normalize_quantity(
 
         return 0.0
 
-    if min_notional > 0:
+    if (
+        min_notional > 0
+        and quantity * price
+        < min_notional
+    ):
 
-        if quantity * price < min_notional:
-
-            return 0.0
+        return 0.0
 
     return quantity
 
 
 # ============================================================
-# CONFIGURAR LEVERAGE
+# LEVERAGE
 # ============================================================
 
 def set_symbol_leverage(
@@ -656,7 +733,8 @@ def set_symbol_leverage(
 
         log(
             f"{symbol} | "
-            f"TEST MODE | leverage pretendido = x{LEVERAGE}"
+            f"TEST | leverage simulado = "
+            f"x{LEVERAGE}"
         )
 
         return True
@@ -673,13 +751,10 @@ def set_symbol_leverage(
             signed=True
         )
 
-        actual = result.get(
-            "leverage"
-        )
-
         log(
             f"{symbol} | "
-            f"LEVERAGE CONFIGURADO = x{actual}"
+            f"LEVERAGE = "
+            f"{result.get('leverage')}"
         )
 
         return True
@@ -688,7 +763,7 @@ def set_symbol_leverage(
 
         log(
             f"{symbol} | "
-            f"ERROR CONFIGURANDO LEVERAGE: {e}"
+            f"ERROR LEVERAGE: {e}"
         )
 
         return False
@@ -730,8 +805,8 @@ def calculate_atr(
 
     close = df["close"]
 
-    previous_close = close.shift(
-        1
+    previous_close = (
+        close.shift(1)
     )
 
     tr = pd.concat(
@@ -744,7 +819,7 @@ def calculate_atr(
                 low - previous_close
             ).abs(),
         ],
-        axis=1,
+        axis=1
     ).max(
         axis=1
     )
@@ -752,10 +827,6 @@ def calculate_atr(
     atr = tr.rolling(
         period
     ).mean()
-
-    if atr.empty:
-
-        return None
 
     value = atr.iloc[-1]
 
@@ -767,73 +838,135 @@ def calculate_atr(
 
 
 # ============================================================
-# INDICADORES
+# INDICADORES FReinforced
 #
-# ESTRATEGIA ORIGINAL
+# Basado en la estrategia publicada por
+# freqtrade/freqtrade-strategies.
+#
+# Timeframe base: 5m
+# Timeframe superior: 60m
+#
+# EMA SHORT = 8
+# EMA LONG  = 21
+# SMA       = 50 en 60m
 # ============================================================
 
-def calculate_indicators(df):
+def calculate_freinforced_indicators(
+    df
+):
 
     df = df.copy()
 
-    df["ema9"] = df["close"].ewm(
-        span=9,
-        adjust=False
-    ).mean()
+    # --------------------------------------------------------
+    # EMA 8
+    # --------------------------------------------------------
 
-    df["ema21"] = df["close"].ewm(
-        span=21,
-        adjust=False
-    ).mean()
-
-    df["ema50"] = df["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    delta = df["close"].diff()
-
-    gain = delta.clip(
-        lower=0
-    )
-
-    loss = -delta.clip(
-        upper=0
-    )
-
-    avg_gain = gain.rolling(
-        14
-    ).mean()
-
-    avg_loss = loss.rolling(
-        14
-    ).mean()
-
-    rs = (
-        avg_gain
-        / avg_loss.replace(
-            0,
-            1e-10
+    df["ema_short"] = (
+        df["close"]
+        .ewm(
+            span=8,
+            adjust=False
         )
+        .mean()
     )
 
-    df["rsi"] = (
-        100
-        - (
-            100
-            / (
-                1 + rs
-            )
+    # --------------------------------------------------------
+    # EMA 21
+    # --------------------------------------------------------
+
+    df["ema_long"] = (
+        df["close"]
+        .ewm(
+            span=21,
+            adjust=False
         )
+        .mean()
     )
 
-    df["volume_ma"] = df[
-        "volume"
-    ].rolling(
-        20
-    ).mean()
+    # --------------------------------------------------------
+    # TIMEFRAME SUPERIOR
+    #
+    # 12 velas de 5m = 1 hora.
+    # Usamos el cierre de cada bloque horario.
+    # --------------------------------------------------------
 
-    # ATR original
+    temp = df[
+        [
+            "timestamp",
+            "close"
+        ]
+    ].copy()
+
+    temp["datetime"] = pd.to_datetime(
+        temp["timestamp"],
+        unit="ms",
+        utc=True
+    )
+
+    temp = temp.set_index(
+        "datetime"
+    )
+
+    hourly = (
+        temp["close"]
+        .resample("1h")
+        .last()
+        .dropna()
+    )
+
+    # --------------------------------------------------------
+    # SMA 50 DEL 1H
+    # --------------------------------------------------------
+
+    hourly_sma = (
+        hourly
+        .rolling(50)
+        .mean()
+    )
+
+    # --------------------------------------------------------
+    # VOLVER A 5M
+    #
+    # El valor de SMA se aplica a las velas de ese periodo.
+    # --------------------------------------------------------
+
+    sma_df = (
+        hourly_sma
+        .rename("htf_sma")
+        .reset_index()
+    )
+
+    sma_df["datetime"] = (
+        sma_df["datetime"]
+        + pd.Timedelta(hours=1)
+    )
+
+    sma_df = sma_df.set_index(
+        "datetime"
+    )
+
+    df = df.set_index(
+        "datetime"
+    )
+
+    df = df.join(
+        sma_df[
+            ["htf_sma"]
+        ],
+        how="left"
+    )
+
+    df["htf_sma"] = (
+        df["htf_sma"]
+        .ffill()
+    )
+
+    df = df.reset_index()
+
+    # --------------------------------------------------------
+    # ATR PARA GESTION DE RIESGO
+    # --------------------------------------------------------
+
     df["atr"] = calculate_atr(
         df
     )
@@ -842,9 +975,113 @@ def calculate_indicators(df):
 
 
 # ============================================================
-# SEÑAL
+# CRUCE ALCISTA
+# ============================================================
+
+def crossed_above(
+    series_a,
+    series_b
+):
+
+    if len(series_a) < 2:
+
+        return False
+
+    current_a = (
+        series_a.iloc[-1]
+    )
+
+    previous_a = (
+        series_a.iloc[-2]
+    )
+
+    current_b = (
+        series_b.iloc[-1]
+    )
+
+    previous_b = (
+        series_b.iloc[-2]
+    )
+
+    if any(
+        pd.isna(x)
+        for x in [
+            current_a,
+            previous_a,
+            current_b,
+            previous_b
+        ]
+    ):
+
+        return False
+
+    return (
+        previous_a
+        <= previous_b
+        and current_a
+        > current_b
+    )
+
+
+# ============================================================
+# CRUCE BAJISTA
+# ============================================================
+
+def crossed_below(
+    series_a,
+    series_b
+):
+
+    if len(series_a) < 2:
+
+        return False
+
+    current_a = (
+        series_a.iloc[-1]
+    )
+
+    previous_a = (
+        series_a.iloc[-2]
+    )
+
+    current_b = (
+        series_b.iloc[-1]
+    )
+
+    previous_b = (
+        series_b.iloc[-2]
+    )
+
+    if any(
+        pd.isna(x)
+        for x in [
+            current_a,
+            previous_a,
+            current_b,
+            previous_b
+        ]
+    ):
+
+        return False
+
+    return (
+        previous_a
+        >= previous_b
+        and current_a
+        < current_b
+    )
+
+
+# ============================================================
+# SEÑAL FReinforced
 #
-# ESTRATEGIA ORIGINAL SIN CAMBIOS
+# LONG:
+# close > SMA 50 de 1H
+# + cruce EMA8 sobre EMA21
+#
+# SHORT:
+# close < SMA 50 de 1H
+# + cruce EMA8 bajo EMA21
 # ============================================================
 
 def calculate_signal(
@@ -854,9 +1091,9 @@ def calculate_signal(
     with state_lock:
 
         candles = list(
-            market_data[symbol][
-                "candles"
-            ]
+            market_data[
+                symbol
+            ]["candles"]
         )
 
     if len(candles) < MIN_CANDLES:
@@ -872,147 +1109,89 @@ def calculate_signal(
             "low",
             "close",
             "volume",
-        ],
+        ]
     )
 
-    df = calculate_indicators(
-        df
+    df = (
+        calculate_freinforced_indicators(
+            df
+        )
     )
 
     last = df.iloc[-1]
 
-    previous = df.iloc[-2]
-
-    values = [
-        last["ema9"],
-        last["ema21"],
-        last["ema50"],
-        last["rsi"],
-        last["volume_ma"],
+    required = [
+        last["ema_short"],
+        last["ema_long"],
+        last["htf_sma"],
         last["atr"],
     ]
 
     if any(
         pd.isna(x)
-        for x in values
+        for x in required
     ):
 
         return None
+
+    long_cross = (
+        crossed_above(
+            df["ema_short"],
+            df["ema_long"]
+        )
+    )
+
+    short_cross = (
+        crossed_below(
+            df["ema_short"],
+            df["ema_long"]
+        )
 
     close = float(
         last["close"]
     )
 
-    ema9 = float(
-        last["ema9"]
+    ema_short = float(
+        last["ema_short"]
     )
 
-    ema21 = float(
-        last["ema21"]
+    ema_long = float(
+        last["ema_long"]
     )
 
-    ema50 = float(
-        last["ema50"]
+    htf_sma = float(
+        last["htf_sma"]
     )
 
-    rsi = float(
-        last["rsi"]
+    atr = float(
+        last["atr"]
     )
-
-    volume = float(
-        last["volume"]
-    )
-
-    volume_ma = float(
-        last["volume_ma"]
-    )
-
-    previous_close = float(
-        previous["close"]
-    )
-
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
-
-    long_score = 0
-
-    if ema9 > ema21:
-
-        long_score += 1
-
-    if ema21 > ema50:
-
-        long_score += 1
-
-    if close > ema9:
-
-        long_score += 1
-
-    if 50 < rsi < 72:
-
-        long_score += 1
-
-    if volume > volume_ma:
-
-        long_score += 1
-
-    if close > previous_close:
-
-        long_score += 1
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
-
-    short_score = 0
-
-    if ema9 < ema21:
-
-        short_score += 1
-
-    if ema21 < ema50:
-
-        short_score += 1
-
-    if close < ema9:
-
-        short_score += 1
-
-    if 28 < rsi < 50:
-
-        short_score += 1
-
-    if volume > volume_ma:
-
-        short_score += 1
-
-    if close < previous_close:
-
-        short_score += 1
 
     signal = None
 
     if (
-        long_score >= 5
-        and long_score - short_score >= 2
+        close > htf_sma
+        and long_cross
     ):
 
         signal = "LONG"
 
     elif (
-        short_score >= 5
-        and short_score - long_score >= 2
+        close < htf_sma
+        and short_cross
     ):
 
         signal = "SHORT"
 
     log(
         f"{symbol} | "
+        f"FREINFORCED | "
         f"price={close:.8f} | "
-        f"RSI={rsi:.1f} | "
-        f"LONG={long_score} | "
-        f"SHORT={short_score} | "
+        f"EMA8={ema_short:.8f} | "
+        f"EMA21={ema_long:.8f} | "
+        f"SMA1H50={htf_sma:.8f} | "
+        f"LONG_CROSS={long_cross} | "
+        f"SHORT_CROSS={short_cross} | "
         f"signal={signal}"
     )
 
@@ -1041,9 +1220,6 @@ def _ws_signature(params):
 
 # ============================================================
 # WS API REQUEST
-#
-# UN SOLO REQUEST A LA VEZ
-# para evitar respuestas cruzadas.
 # ============================================================
 
 def ws_api_request(
@@ -1114,12 +1290,13 @@ def ws_api_request(
         )
 
         ws.send(
-            json.dumps(
-                request
-            )
+            json.dumps(request)
         )
 
-        deadline = time.time() + timeout
+        deadline = (
+            time.time()
+            + timeout
+        )
 
         response = None
 
@@ -1135,8 +1312,6 @@ def ws_api_request(
                 raw
             )
 
-            # Puede haber mensajes que no correspondan
-            # al request actual.
             if response.get(
                 "id"
             ) == request_id:
@@ -1146,7 +1321,8 @@ def ws_api_request(
         if response is None:
 
             raise Exception(
-                f"Timeout esperando respuesta de {method}"
+                f"Timeout esperando "
+                f"{method}"
             )
 
         if response.get(
@@ -1154,7 +1330,8 @@ def ws_api_request(
         ) != request_id:
 
             raise Exception(
-                f"Respuesta WS incorrecta: {response}"
+                f"Respuesta WS incorrecta: "
+                f"{response}"
             )
 
     if response.get(
@@ -1179,7 +1356,9 @@ def get_usdt_balance():
 
     if not LIVE_TRADING:
 
-        return START_BALANCE
+        with state_lock:
+
+            return paper_balance
 
     result = ws_api_request(
         "account.balance",
@@ -1218,11 +1397,10 @@ def calculate_max_quantity_by_margin(
     available_balance
 ):
 
-    if price <= 0:
-
-        return 0.0
-
-    if available_balance <= 0:
+    if (
+        price <= 0
+        or available_balance <= 0
+    ):
 
         return 0.0
 
@@ -1243,14 +1421,7 @@ def calculate_max_quantity_by_margin(
 
 
 # ============================================================
-# CALCULO DE POSICION
-#
-# Riesgo = balance * 1%
-#
-# quantity = riesgo / distancia_stop
-#
-# IMPORTANTE:
-# El leverage NO multiplica el riesgo teorico.
+# CALCULAR CANTIDAD
 # ============================================================
 
 def calculate_position_size(
@@ -1277,10 +1448,18 @@ def calculate_position_size(
         * RISK_PER_TRADE
     )
 
+    # --------------------------------------------------------
+    # TAMAÑO POR RIESGO
+    # --------------------------------------------------------
+
     risk_quantity = (
         risk_money
         / stop_distance
     )
+
+    # --------------------------------------------------------
+    # TAMAÑO POR MARGEN
+    # --------------------------------------------------------
 
     margin_quantity = (
         calculate_max_quantity_by_margin(
@@ -1320,12 +1499,11 @@ def calculate_position_size(
 
         log(
             f"{symbol} | "
-            f"NO TRADE: capital demasiado pequeño "
-            f"para cumplir reglas sin superar "
-            f"el riesgo del "
-            f"{RISK_PER_TRADE * 100:.2f}% | "
-            f"balance={balance:.4f} | "
-            f"riesgo=${risk_money:.4f} | "
+            f"NO TRADE | "
+            f"cantidad calculada menor "
+            f"que las reglas Binance | "
+            f"balance={balance:.6f} | "
+            f"risk=${risk_money:.6f} | "
             f"minQty={min_qty} | "
             f"minNotional={min_notional}"
         )
@@ -1339,7 +1517,6 @@ def calculate_position_size(
 
     max_allowed_risk = (
         risk_money
-        * MAX_RISK_MULTIPLIER
     )
 
     if theoretical_risk > (
@@ -1349,10 +1526,10 @@ def calculate_position_size(
 
         log(
             f"{symbol} | "
-            f"NO TRADE: cantidad mínima "
-            f"superaría riesgo permitido | "
-            f"risk={theoretical_risk:.8f} | "
-            f"max={max_allowed_risk:.8f}"
+            f"NO TRADE | "
+            f"cantidad supera riesgo | "
+            f"risk=${theoretical_risk:.6f} | "
+            f"max=${max_allowed_risk:.6f}"
         )
 
         return 0.0
@@ -1374,7 +1551,8 @@ def calculate_position_size(
 
         log(
             f"{symbol} | "
-            f"NO TRADE: margen insuficiente"
+            f"NO TRADE | "
+            f"margen insuficiente"
         )
 
         return 0.0
@@ -1382,13 +1560,13 @@ def calculate_position_size(
     log(
         f"{symbol} | "
         f"SIZE | "
-        f"balance={balance:.4f} | "
-        f"risk=${risk_money:.4f} | "
+        f"balance={balance:.6f} | "
+        f"risk=${risk_money:.6f} | "
         f"qty={quantity:.12f} | "
-        f"notional=${notional:.4f} | "
-        f"margin=${margin_required:.4f} | "
-        f"leverage=x{LEVERAGE} | "
-        f"risk_real=${theoretical_risk:.4f}"
+        f"notional=${notional:.6f} | "
+        f"margin=${margin_required:.6f} | "
+        f"x{LEVERAGE} | "
+        f"risk=${theoretical_risk:.6f}"
     )
 
     return quantity
@@ -1400,7 +1578,8 @@ def calculate_position_size(
 
 def normalize_stop_price(
     symbol,
-    price
+    price,
+    side=None
 ):
 
     rule = symbol_rules.get(
@@ -1420,6 +1599,36 @@ def normalize_stop_price(
 
         return price
 
+    # --------------------------------------------------------
+    # LONG STOP:
+    # debe quedar por debajo.
+    #
+    # SHORT STOP:
+    # debe quedar por encima.
+    #
+    # Para SHORT usamos ceil.
+    # --------------------------------------------------------
+
+    if side == "SHORT":
+
+        value_dec = Decimal(
+            str(price)
+        )
+
+        tick_dec = Decimal(
+            str(tick)
+        )
+
+        units = (
+            value_dec / tick_dec
+        ).to_integral_value(
+            rounding="ROUND_CEILING"
+        )
+
+        return float(
+            units * tick_dec
+        )
+
     return floor_price(
         price,
         tick
@@ -1427,10 +1636,7 @@ def normalize_stop_price(
 
 
 # ============================================================
-# COLOCAR STOP REAL
-#
-# Futures USD-M usa actualmente algoOrder para
-# las órdenes condicionales.
+# STOP REAL
 # ============================================================
 
 def place_exchange_stop(
@@ -1447,7 +1653,8 @@ def place_exchange_stop(
 
     stop_price = normalize_stop_price(
         symbol,
-        stop_price
+        stop_price,
+        side
     )
 
     params = {
@@ -1508,8 +1715,8 @@ def cancel_order(
 
         log(
             f"{symbol} | "
-            f"ERROR cancelando STOP "
-            f"{order_id}: {e}"
+            f"ERROR CANCELANDO STOP: "
+            f"{e}"
         )
 
         return False
@@ -1530,7 +1737,8 @@ def update_exchange_stop(
 
     stop = normalize_stop_price(
         symbol,
-        stop
+        stop,
+        position["side"]
     )
 
     old_id = position.get(
@@ -1555,13 +1763,6 @@ def update_exchange_stop(
 
         return True
 
-    # --------------------------------------------------------
-    # Primero intentamos colocar el nuevo STOP.
-    # Solo después cancelamos el anterior.
-    # Así evitamos quedar sin protección durante
-    # la actualización.
-    # --------------------------------------------------------
-
     try:
 
         result = place_exchange_stop(
@@ -1579,11 +1780,9 @@ def update_exchange_stop(
         if not algo_id:
 
             raise Exception(
-                f"Binance no devolvio algoId: "
-                f"{result}"
+                f"Binance no devolvio "
+                f"algoId: {result}"
             )
-
-        old_id_to_cancel = old_id
 
         position[
             "stop_order_id"
@@ -1600,13 +1799,11 @@ def update_exchange_stop(
             f"algoId={algo_id}"
         )
 
-        # Cancelamos el anterior después
-        # de tener el nuevo activo.
-        if old_id_to_cancel:
+        if old_id:
 
             cancel_order(
                 symbol,
-                old_id_to_cancel
+                old_id
             )
 
         return True
@@ -1618,8 +1815,6 @@ def update_exchange_stop(
             f"ERROR STOP REAL: {e}"
         )
 
-        # Si no había stop anterior, dejamos
-        # el estado vacío.
         if not old_id:
 
             position[
@@ -1634,6 +1829,46 @@ def update_exchange_stop(
 
 
 # ============================================================
+# SIMULAR PRECIO DE ENTRADA
+# ============================================================
+
+def simulate_entry_price(
+    price,
+    side
+):
+
+    if side == "LONG":
+
+        return price * (
+            1 + SLIPPAGE
+        )
+
+    return price * (
+        1 - SLIPPAGE
+    )
+
+
+# ============================================================
+# SIMULAR PRECIO DE SALIDA
+# ============================================================
+
+def simulate_exit_price(
+    price,
+    side
+):
+
+    if side == "LONG":
+
+        return price * (
+            1 - SLIPPAGE
+        )
+
+    return price * (
+        1 + SLIPPAGE
+    )
+
+
+# ============================================================
 # ABRIR POSICION
 # ============================================================
 
@@ -1642,17 +1877,13 @@ def open_position(
     side
 ):
 
+    global paper_balance
+
     with order_lock:
 
         with state_lock:
 
             if symbol in positions:
-
-                log(
-                    f"{symbol} | "
-                    f"Entrada cancelada: "
-                    f"ya existe posicion"
-                )
 
                 return
 
@@ -1691,28 +1922,60 @@ def open_position(
 
             return
 
-        order_side = (
-            "BUY"
-            if side == "LONG"
-            else "SELL"
-        )
-
         # ----------------------------------------------------
         # TEST
         # ----------------------------------------------------
 
         if not LIVE_TRADING:
 
-            avg_price = price
+            avg_price = (
+                simulate_entry_price(
+                    price,
+                    side
+                )
+            )
 
             executed_qty = quantity
+
+            notional = (
+                avg_price
+                * executed_qty
+            )
+
+            margin = (
+                notional
+                / LEVERAGE
+            )
+
+            fee = (
+                notional
+                * TAKER_FEE
+            )
+
+            with state_lock:
+
+                if fee > paper_balance:
+
+                    log(
+                        f"{symbol} | "
+                        f"TEST | "
+                        f"NO HAY BALANCE PARA FEE"
+                    )
+
+                    return
+
+                paper_balance -= fee
 
             log(
                 f"TEST OPEN | "
                 f"{symbol} | "
                 f"{side} | "
                 f"entry={avg_price:.8f} | "
-                f"qty={executed_qty:.12f}"
+                f"qty={executed_qty:.12f} | "
+                f"notional=${notional:.6f} | "
+                f"margin=${margin:.6f} | "
+                f"fee=${fee:.6f} | "
+                f"balance=${paper_balance:.6f}"
             )
 
         # ----------------------------------------------------
@@ -1720,6 +1983,12 @@ def open_position(
         # ----------------------------------------------------
 
         else:
+
+            order_side = (
+                "BUY"
+                if side == "LONG"
+                else "SELL"
+            )
 
             try:
 
@@ -1781,7 +2050,7 @@ def open_position(
                 return
 
         # ----------------------------------------------------
-        # CREAR POSICION INTERNA
+        # STOP
         # ----------------------------------------------------
 
         initial_stop = (
@@ -1808,13 +2077,11 @@ def open_position(
 
         with state_lock:
 
-            # Segunda comprobacion antes de insertar.
             if symbol in positions:
 
                 log(
                     f"{symbol} | "
-                    f"Posicion ya existente. "
-                    f"No se registra segunda posicion."
+                    f"YA EXISTE POSICION"
                 )
 
                 return
@@ -1838,14 +2105,10 @@ def open_position(
 
                 log(
                     f"{symbol} | "
-                    f"ALERTA CRITICA: "
-                    f"entrada ejecutada pero STOP "
-                    f"no pudo colocarse."
+                    f"ALERTA CRITICA | "
+                    f"STOP NO COLOCADO"
                 )
 
-                # Cierre de emergencia.
-                # close_position intentará cerrar
-                # aunque no haya stop.
                 try:
 
                     close_position(
@@ -1854,12 +2117,12 @@ def open_position(
                         "STOP NO COLOCADO"
                     )
 
-                except Exception as close_error:
+                except Exception as e:
 
                     log(
                         f"{symbol} | "
-                        f"FALLO CIERRE EMERGENCIA: "
-                        f"{close_error}"
+                        f"CIERRE EMERGENCIA "
+                        f"FALLO: {e}"
                     )
 
                 return
@@ -1876,12 +2139,6 @@ def open_position(
 
 # ============================================================
 # CERRAR POSICION
-#
-# CORRECCION IMPORTANTE:
-# Primero ejecuta el cierre.
-# Después cancela el STOP.
-#
-# El código anterior cancelaba primero el STOP.
 # ============================================================
 
 def close_position(
@@ -1889,6 +2146,8 @@ def close_position(
     price,
     reason
 ):
+
+    global paper_balance
 
     with order_lock:
 
@@ -1918,19 +2177,18 @@ def close_position(
                 "stop_order_id"
             )
 
-        close_side = (
-            "SELL"
-            if side == "LONG"
-            else "BUY"
-        )
-
         # ----------------------------------------------------
         # TEST
         # ----------------------------------------------------
 
         if not LIVE_TRADING:
 
-            exit_price = price
+            exit_price = (
+                simulate_exit_price(
+                    price,
+                    side
+                )
+            )
 
             executed_qty = quantity
 
@@ -1939,6 +2197,12 @@ def close_position(
         # ----------------------------------------------------
 
         else:
+
+            close_side = (
+                "SELL"
+                if side == "LONG"
+                else "BUY"
+            )
 
             try:
 
@@ -1985,34 +2249,48 @@ def close_position(
 
             except Exception as e:
 
-                # MUY IMPORTANTE:
-                # Si el cierre falla, NO quitamos la
-                # posicion interna ni eliminamos el STOP.
                 log(
                     f"{symbol} | "
-                    f"ERROR CERRANDO POSICION: {e}"
+                    f"ERROR CERRANDO: {e}"
                 )
 
                 return
 
         # ----------------------------------------------------
-        # PNL
+        # PNL BRUTO
         # ----------------------------------------------------
 
-        pnl = (
-            (
+        if side == "LONG":
+
+            pnl = (
                 exit_price
                 - entry
-            )
-            * executed_qty
-            if side == "LONG"
-            else
-            (
+            ) * executed_qty
+
+        else:
+
+            pnl = (
                 entry
                 - exit_price
-            )
+            ) * executed_qty
+
+        # ----------------------------------------------------
+        # COMISION DE SALIDA
+        # ----------------------------------------------------
+
+        exit_notional = (
+            exit_price
             * executed_qty
         )
+
+        exit_fee = (
+            exit_notional
+            * TAKER_FEE
+        )
+
+        # ----------------------------------------------------
+        # R
+        # ----------------------------------------------------
 
         initial_risk = position[
             "initial_risk"
@@ -2039,8 +2317,22 @@ def close_position(
             r_multiple = 0.0
 
         # ----------------------------------------------------
-        # AHORA QUE EL CIERRE SE EJECUTO,
-        # CANCELAMOS EL STOP RESTANTE.
+        # BALANCE TEST
+        # ----------------------------------------------------
+
+        net_pnl = (
+            pnl
+            - exit_fee
+        )
+
+        if not LIVE_TRADING:
+
+            with state_lock:
+
+                paper_balance += net_pnl
+
+        # ----------------------------------------------------
+        # CANCELAR STOP DESPUES DEL CIERRE
         # ----------------------------------------------------
 
         if LIVE_TRADING and stop_order_id:
@@ -2050,11 +2342,37 @@ def close_position(
                 stop_order_id
             )
 
+        # ----------------------------------------------------
+        # HISTORIAL
+        # ----------------------------------------------------
+
+        trade = {
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "exit": exit_price,
+            "quantity": executed_qty,
+            "gross_pnl": pnl,
+            "exit_fee": exit_fee,
+            "net_pnl": net_pnl,
+            "r": r_multiple,
+            "reason": reason,
+            "time": time.time(),
+        }
+
         with state_lock:
 
             positions.pop(
                 symbol,
                 None
+            )
+
+            trade_history.append(
+                trade
+            )
+
+            balance_now = (
+                paper_balance
             )
 
         log(
@@ -2064,14 +2382,17 @@ def close_position(
             f"entry={entry:.8f} | "
             f"exit={exit_price:.8f} | "
             f"qty={executed_qty:.12f} | "
-            f"PnL={pnl:+.6f} USDT | "
+            f"gross={pnl:+.6f} USDT | "
+            f"fee={exit_fee:.6f} | "
+            f"net={net_pnl:+.6f} | "
             f"R={r_multiple:+.2f} | "
-            f"reason={reason}"
+            f"reason={reason} | "
+            f"TEST_BAL=${balance_now:.6f}"
         )
 
 
 # ============================================================
-# GESTION DE POSICION
+# GESTION POSICION
 # ============================================================
 
 def manage_position(
@@ -2154,11 +2475,12 @@ def manage_position(
     ]
 
     # --------------------------------------------------------
-    # PROTECCIONES DE GANANCIA
-    # SIN CAMBIOS
+    # PROTECCION
     # --------------------------------------------------------
 
-    for trigger_r, protect_r in PROTECTION_LEVELS:
+    for trigger_r, protect_r in (
+        PROTECTION_LEVELS
+    ):
 
         if mfe >= trigger_r:
 
@@ -2188,10 +2510,11 @@ def manage_position(
 
     # --------------------------------------------------------
     # TRAILING
-    # SIN CAMBIOS
     # --------------------------------------------------------
 
-    for trigger_r, gap_r in TRAILING_LEVELS:
+    for trigger_r, gap_r in (
+        TRAILING_LEVELS
+    ):
 
         if mfe >= trigger_r:
 
@@ -2278,7 +2601,7 @@ def manage_position(
             )
 
     # --------------------------------------------------------
-    # STOP LOCAL DE SEGURIDAD
+    # STOP LOCAL
     # --------------------------------------------------------
 
     if (
@@ -2289,8 +2612,7 @@ def manage_position(
         close_position(
             symbol,
             price,
-            f"PROTECTED STOP | "
-            f"MFE={mfe_r:.2f}R"
+            f"STOP | MFE={mfe_r:.2f}R"
         )
 
         return
@@ -2303,8 +2625,7 @@ def manage_position(
         close_position(
             symbol,
             price,
-            f"PROTECTED STOP | "
-            f"MFE={mfe_r:.2f}R"
+            f"STOP | MFE={mfe_r:.2f}R"
         )
 
         return
@@ -2321,8 +2642,7 @@ def manage_position(
         close_position(
             symbol,
             price,
-            f"TIME STOP | "
-            f"MFE={mfe_r:.2f}R"
+            f"TIME STOP | MFE={mfe_r:.2f}R"
         )
 
 
@@ -2355,11 +2675,13 @@ def process_candle(
             "low",
             "close",
             "volume",
-        ],
+        ]
     )
 
-    df = calculate_indicators(
-        df
+    df = (
+        calculate_freinforced_indicators(
+            df
+        )
     )
 
     atr = df[
@@ -2392,23 +2714,24 @@ def process_candle(
             symbol
         )
 
-        total_positions = len(
-            positions
-        )
-
         price = market_data[
             symbol
         ]["price"]
 
+        total_positions = len(
+            positions
+        )
+
     # --------------------------------------------------------
-    # SI YA HAY POSICION
+    # POSICION EXISTENTE
     # --------------------------------------------------------
 
     if existing is not None:
 
-        if existing[
-            "side"
-        ] != signal:
+        if (
+            existing["side"]
+            != signal
+        ):
 
             if price is not None:
 
@@ -2421,7 +2744,7 @@ def process_candle(
         return
 
     # --------------------------------------------------------
-    # LIMITE GLOBAL
+    # LIMITE
     # --------------------------------------------------------
 
     if total_positions >= MAX_POSITIONS:
@@ -2439,13 +2762,13 @@ def process_candle(
 
 
 # ============================================================
-# CARGAR VELAS INICIALES
+# CARGAR VELAS
 # ============================================================
 
 def load_initial_candles():
 
     log(
-        "Cargando historial inicial de velas..."
+        "Cargando historial inicial..."
     )
 
     for symbol in SYMBOLS:
@@ -2479,29 +2802,31 @@ def load_initial_candles():
 
             if candles:
 
-                # La última vela está abierta.
-                # Se excluye del historial para señales.
                 with state_lock:
 
+                    # ultima vela abierta fuera
                     market_data[
                         symbol
-                    ]["candles"] = candles[:-1]
+                    ]["candles"] = (
+                        candles[:-1]
+                    )
 
                     market_data[
                         symbol
-                    ]["price"] = candles[-1][4]
+                    ]["price"] = (
+                        candles[-1][4]
+                    )
 
                 log(
                     f"{symbol} | "
-                    f"Velas iniciales cargadas: "
-                    f"{len(candles[:-1])}"
+                    f"VELAS={len(candles[:-1])}"
                 )
 
         except Exception as e:
 
             log(
                 f"{symbol} | "
-                f"ERROR historial inicial: {e}"
+                f"ERROR HISTORIAL: {e}"
             )
 
         time.sleep(
@@ -2550,8 +2875,6 @@ def on_market_message(
 
         # ----------------------------------------------------
         # VELA ABIERTA
-        # Solo actualizamos precio.
-        # NO señal.
         # ----------------------------------------------------
 
         if not kline["x"]:
@@ -2579,7 +2902,10 @@ def on_market_message(
 
             if candles:
 
-                if candles[-1][0] == candle[0]:
+                if (
+                    candles[-1][0]
+                    == candle[0]
+                ):
 
                     candles[-1] = candle
 
@@ -2595,13 +2921,15 @@ def on_market_message(
                     candle
                 )
 
-            if len(candles) > 300:
+            if len(candles) > 800:
 
-                del candles[:-300]
+                del candles[:-800]
 
             market_data[
                 symbol
-            ]["last_candle_time"] = candle[0]
+            ]["last_candle_time"] = (
+                candle[0]
+            )
 
         process_candle(
             symbol
@@ -2611,7 +2939,7 @@ def on_market_message(
 
         log(
             f"{symbol} | "
-            f"Market WS error: {e}"
+            f"MARKET WS ERROR: {e}"
         )
 
 
@@ -2644,7 +2972,7 @@ def make_market_error(
 
         log(
             f"{symbol} | "
-            f"Market WS error: {error}"
+            f"MARKET WS ERROR: {error}"
         )
 
     return callback
@@ -2662,7 +2990,7 @@ def make_market_close(
 
         log(
             f"{symbol} | "
-            f"Market WS cerrado: "
+            f"MARKET WS CERRADO: "
             f"{code} {msg}"
         )
 
@@ -2720,7 +3048,7 @@ def market_websocket_loop(
 
             log(
                 f"{symbol} | "
-                f"Market exception: {e}"
+                f"MARKET EXCEPTION: {e}"
             )
 
         time.sleep(
@@ -2729,7 +3057,7 @@ def market_websocket_loop(
 
 
 # ============================================================
-# USER DATA STREAM / WS API
+# USER DATA STREAM
 # ============================================================
 
 def start_user_data_stream():
@@ -2759,12 +3087,13 @@ def start_user_data_stream():
     }
 
     ws.send(
-        json.dumps(
-            request
-        )
+        json.dumps(request)
     )
 
-    deadline = time.time() + 15
+    deadline = (
+        time.time()
+        + 15
+    )
 
     response = None
 
@@ -2782,13 +3111,14 @@ def start_user_data_stream():
 
     if (
         response is None
-        or response.get("id") != request_id
+        or response.get("id")
+        != request_id
     ):
 
         ws.close()
 
         raise Exception(
-            "Timeout iniciando userDataStream"
+            "Timeout userDataStream.start"
         )
 
     if response.get(
@@ -2804,8 +3134,13 @@ def start_user_data_stream():
 
     key = (
         response
-        .get("result", {})
-        .get("listenKey")
+        .get(
+            "result",
+            {}
+        )
+        .get(
+            "listenKey"
+        )
     )
 
     if not key:
@@ -2830,7 +3165,7 @@ def start_user_data_stream():
 
 
 # ============================================================
-# USER WS CALLBACKS
+# USER CALLBACKS
 # ============================================================
 
 def on_user_open(ws):
@@ -2846,7 +3181,7 @@ def on_user_error(
 ):
 
     log(
-        f"User WS error: {error}"
+        f"USER WS ERROR: {error}"
     )
 
 
@@ -2857,7 +3192,7 @@ def on_user_close(
 ):
 
     log(
-        f"User WS cerrado: "
+        f"USER WS CERRADO: "
         f"{code} {msg}"
     )
 
@@ -2908,10 +3243,6 @@ def sync_account_positions(
 
             continue
 
-        # ----------------------------------------------------
-        # POSICION CERRADA
-        # ----------------------------------------------------
-
         if amount == 0:
 
             with state_lock:
@@ -2923,7 +3254,8 @@ def sync_account_positions(
 
             log(
                 f"ACCOUNT SYNC | "
-                f"{symbol} | POSICION CERRADA"
+                f"{symbol} | "
+                f"CERRADA"
             )
 
             continue
@@ -2969,9 +3301,8 @@ def sync_account_positions(
 
             if (
                 old
-                and old.get(
-                    "side"
-                ) == side
+                and old.get("side")
+                == side
             ):
 
                 stop = old.get(
@@ -3054,7 +3385,9 @@ def sync_account_positions(
                 "bars": bars,
                 "opened_at": opened_at,
                 "stop_order_id": stop_id,
-                "exchange_stop_price": exchange_stop,
+                "exchange_stop_price": (
+                    exchange_stop
+                ),
             }
 
         log(
@@ -3067,7 +3400,7 @@ def sync_account_positions(
 
 
 # ============================================================
-# USER DATA MESSAGE
+# USER MESSAGE
 # ============================================================
 
 def on_user_message(
@@ -3085,7 +3418,9 @@ def on_user_message(
             "e"
         )
 
-        if event_type == "listenKeyExpired":
+        if event_type == (
+            "listenKeyExpired"
+        ):
 
             log(
                 "LISTEN KEY EXPIRADO"
@@ -3099,17 +3434,21 @@ def on_user_message(
 
                 pass
 
-        elif event_type == "ACCOUNT_UPDATE":
+        elif event_type == (
+            "ACCOUNT_UPDATE"
+        ):
 
             sync_account_positions(
                 data
             )
 
             log(
-                "ACCOUNT_UPDATE recibido"
+                "ACCOUNT_UPDATE"
             )
 
-        elif event_type == "ORDER_TRADE_UPDATE":
+        elif event_type == (
+            "ORDER_TRADE_UPDATE"
+        ):
 
             order = data.get(
                 "o",
@@ -3124,7 +3463,9 @@ def on_user_message(
                 f"exec={order.get('x')}"
             )
 
-        elif event_type == "ALGO_UPDATE":
+        elif event_type == (
+            "ALGO_UPDATE"
+        ):
 
             log(
                 f"ALGO UPDATE | "
@@ -3134,7 +3475,7 @@ def on_user_message(
     except Exception as e:
 
         log(
-            f"Error User WS: {e}"
+            f"USER MESSAGE ERROR: {e}"
         )
 
 
@@ -3153,24 +3494,28 @@ def user_websocket_loop():
 
         try:
 
-            key = start_user_data_stream()
+            key = (
+                start_user_data_stream()
+            )
 
             if USE_TESTNET:
 
                 ws_url = (
-                    "wss://stream.binancefuture.com/private/ws/"
+                    "wss://stream.binancefuture.com/"
+                    "private/ws/"
                     + key
                 )
 
             else:
 
                 ws_url = (
-                    "wss://fstream.binance.com/private/ws/"
+                    "wss://fstream.binance.com/"
+                    "private/ws/"
                     + key
                 )
 
             log(
-                "Conectando User Data Stream..."
+                "Conectando User Data..."
             )
 
             stream_ws = websocket.WebSocketApp(
@@ -3193,7 +3538,7 @@ def user_websocket_loop():
         except Exception as e:
 
             log(
-                f"User WS exception: {e}"
+                f"USER WS EXCEPTION: {e}"
             )
 
         finally:
@@ -3243,8 +3588,6 @@ def user_stream_keepalive_loop():
     global user_stream_control
     global listen_key
 
-    # Binance indica que el stream dura 60 min.
-    # Lo renovamos cada 30 min.
     while True:
 
         time.sleep(
@@ -3277,7 +3620,9 @@ def user_stream_keepalive_loop():
 
                 with user_stream_control_lock:
 
-                    ws = user_stream_control
+                    ws = (
+                        user_stream_control
+                    )
 
                     if ws is None:
 
@@ -3293,14 +3638,22 @@ def user_stream_keepalive_loop():
                         15
                     )
 
-                    deadline = time.time() + 15
+                    deadline = (
+                        time.time()
+                        + 15
+                    )
 
                     response = None
 
-                    while time.time() < deadline:
+                    while (
+                        time.time()
+                        < deadline
+                    ):
 
-                        response = json.loads(
-                            ws.recv()
+                        response = (
+                            json.loads(
+                                ws.recv()
+                            )
                         )
 
                         if response.get(
@@ -3309,19 +3662,12 @@ def user_stream_keepalive_loop():
 
                             break
 
-                    if (
-                        response is None
-                        or response.get("id")
-                        != request_id
-                    ):
-
-                        raise Exception(
-                            "Timeout en keepalive"
-                        )
-
-            if response.get(
-                "status"
-            ) == 200:
+            if (
+                response
+                and response.get(
+                    "status"
+                ) == 200
+            ):
 
                 new_key = (
                     response
@@ -3352,7 +3698,7 @@ def user_stream_keepalive_loop():
         except Exception as e:
 
             log(
-                f"Keepalive error: {e}"
+                f"KEEPALIVE ERROR: {e}"
             )
 
             with user_stream_control_lock:
@@ -3397,12 +3743,68 @@ def position_manager_loop():
         except Exception as e:
 
             log(
-                f"Position manager error: {e}"
+                f"POSITION MANAGER ERROR: {e}"
             )
 
         time.sleep(
             1
         )
+
+
+# ============================================================
+# ESTADISTICAS TEST
+# ============================================================
+
+def calculate_test_statistics():
+
+    with state_lock:
+
+        trades = list(
+            trade_history
+        )
+
+        balance = paper_balance
+
+    total = len(
+        trades
+    )
+
+    if total == 0:
+
+        return {
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "winrate": 0.0,
+            "pnl": 0.0,
+            "balance": balance,
+        }
+
+    wins = sum(
+        1
+        for x in trades
+        if x["net_pnl"] > 0
+    )
+
+    losses = (
+        total - wins
+    )
+
+    pnl = sum(
+        x["net_pnl"]
+        for x in trades
+    )
+
+    return {
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "winrate": (
+            wins / total
+        ) * 100,
+        "pnl": pnl,
+        "balance": balance,
+    }
 
 
 # ============================================================
@@ -3421,17 +3823,38 @@ def status_loop():
                     positions
                 )
 
-            try:
-
-                balance = get_usdt_balance()
-
-            except Exception as e:
-
-                balance = None
-
-                log(
-                    f"STATUS balance error: {e}"
+                balance_test = (
+                    paper_balance
                 )
+
+                trades = len(
+                    trade_history
+                )
+
+            if LIVE_TRADING:
+
+                try:
+
+                    balance = (
+                        get_usdt_balance()
+                    )
+
+                except Exception as e:
+
+                    balance = None
+
+                    log(
+                        f"STATUS BALANCE ERROR: "
+                        f"{e}"
+                    )
+
+            else:
+
+                balance = balance_test
+
+            stats = (
+                calculate_test_statistics()
+            )
 
             log(
                 f"STATUS | "
@@ -3439,14 +3862,18 @@ def status_loop():
                 f"{balance if balance is not None else 'N/A'} | "
                 f"positions="
                 f"{active}/{MAX_POSITIONS} | "
-                f"leverage=x{LEVERAGE} | "
-                f"risk={RISK_PER_TRADE * 100:.2f}%"
+                f"trades={trades} | "
+                f"wins={stats['wins']} | "
+                f"losses={stats['losses']} | "
+                f"winrate={stats['winrate']:.1f}% | "
+                f"PnL={stats['pnl']:+.6f} | "
+                f"x{LEVERAGE}"
             )
 
         except Exception as e:
 
             log(
-                f"Status error: {e}"
+                f"STATUS ERROR: {e}"
             )
 
         time.sleep(
@@ -3520,7 +3947,7 @@ def health_server():
     except Exception as e:
 
         log(
-            f"Health server error: {e}"
+            f"HEALTH SERVER ERROR: {e}"
         )
 
 
@@ -3531,19 +3958,19 @@ def health_server():
 def main():
 
     log(
-        "=============================================="
+        "================================================"
     )
 
     log(
-        "     UNIVERSAL BINANCE FUTURES BOT V3"
+        "     UNIVERSAL BINANCE FUTURES BOT V4"
     )
 
     log(
-        "     CORREGIDO - REAL TRADING"
+        "     FREINFORCED - TEST MODE"
     )
 
     log(
-        "=============================================="
+        "================================================"
     )
 
     log(
@@ -3556,6 +3983,10 @@ def main():
 
     log(
         f"LEVERAGE          = x{LEVERAGE}"
+    )
+
+    log(
+        f"START_BALANCE     = {START_BALANCE} USDT"
     )
 
     log(
@@ -3577,24 +4008,37 @@ def main():
     )
 
     log(
-        f"SYMBOLS           = {len(SYMBOLS)}"
+        f"INITIAL_CANDLES   = {INITIAL_CANDLES}"
     )
 
     log(
-        "=============================================="
+        "STRATEGY          = FReinforced"
+    )
+
+    log(
+        "EMA               = 8 / 21"
+    )
+
+    log(
+        "HTF               = 1H SMA 50"
+    )
+
+    log(
+        "================================================"
     )
 
     if not API_KEY or not API_SECRET:
 
         log(
             "FATAL: faltan "
-            "BINANCE_API_KEY / BINANCE_API_SECRET"
+            "BINANCE_API_KEY / "
+            "BINANCE_API_SECRET"
         )
 
         return
 
     # --------------------------------------------------------
-    # HEALTH SERVER
+    # HEALTH
     # --------------------------------------------------------
 
     threading.Thread(
@@ -3603,7 +4047,7 @@ def main():
     ).start()
 
     # --------------------------------------------------------
-    # REGLAS REALES
+    # REGLAS
     # --------------------------------------------------------
 
     try:
@@ -3613,14 +4057,13 @@ def main():
     except Exception as e:
 
         log(
-            f"FATAL: no se pudieron cargar "
-            f"las reglas Binance: {e}"
+            f"FATAL REGLAS BINANCE: {e}"
         )
 
         return
 
     # --------------------------------------------------------
-    # VELAS INICIALES
+    # HISTORIAL
     # --------------------------------------------------------
 
     try:
@@ -3630,7 +4073,7 @@ def main():
     except Exception as e:
 
         log(
-            f"ERROR cargando historial: {e}"
+            f"ERROR HISTORIAL: {e}"
         )
 
     # --------------------------------------------------------
@@ -3661,6 +4104,8 @@ def main():
 
     # --------------------------------------------------------
     # USER DATA WS
+    #
+    # SE MANTIENE IGUAL QUE V3.
     # --------------------------------------------------------
 
     threading.Thread(
@@ -3696,36 +4141,45 @@ def main():
     ).start()
 
     log(
-        "=============================================="
+        "================================================"
     )
 
     log(
-        "BOT INICIADO"
+        "BOT V4 INICIADO"
     )
 
     log(
-        f"TRADING = "
-        f"{'REAL' if LIVE_TRADING else 'TEST'}"
+        "MODO = TEST"
     )
 
     log(
-        f"LEVERAGE = x{LEVERAGE}"
+        f"CAPITAL SIMULADO = "
+        f"{START_BALANCE:.4f} USDT"
     )
 
     log(
-        f"RISK = {RISK_PER_TRADE * 100:.2f}%"
+        "NO SE ENVIARAN ORDENES REALES"
     )
 
     log(
-        "STOP REAL = ACTIVO"
+        f"LEVERAGE SIMULADO = x{LEVERAGE}"
     )
 
     log(
-        "Esperando velas cerradas..."
+        f"RISK = "
+        f"{RISK_PER_TRADE * 100:.2f}%"
     )
 
     log(
-        "=============================================="
+        "ESTRATEGIA = FREINFORCED"
+    )
+
+    log(
+        "ESPERANDO VELAS CERRADAS..."
+    )
+
+    log(
+        "================================================"
     )
 
     while True:
@@ -3748,7 +4202,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         log(
-            "Bot detenido manualmente"
+            "BOT DETENIDO MANUALMENTE"
         )
 
     except Exception as e:
