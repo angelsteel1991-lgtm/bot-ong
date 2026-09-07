@@ -5,7 +5,6 @@ import json
 import uuid
 import hmac
 import hashlib
-import requests
 from urllib.parse import urlencode
 import threading
 from datetime import datetime, timezone
@@ -16,8 +15,6 @@ import websocket
 
 # ============================================================
 # UNIVERSAL BINANCE FUTURES BOT V3
-#
-# CONEXION BASADA DIRECTAMENTE EN ONGUSDT BOT FUNCIONANDO
 # ============================================================
 
 LIVE_TRADING = True
@@ -38,9 +35,9 @@ MIN_CANDLES = 40
 RECONNECT_SECONDS = 60
 
 
-# ------------------------------------------------------------
+# ============================================================
 # PROTECCION DE GANANCIA
-# ------------------------------------------------------------
+# ============================================================
 
 PROTECTION_LEVELS = [
     (1.0, 0.15),
@@ -87,8 +84,6 @@ if USE_TESTNET:
 
 else:
 
-    # EXACTAMENTE LA BASE USADA POR ONG
-
     MARKET_WS_BASE = (
         "wss://fstream.binance.com/market/ws/"
     )
@@ -99,7 +94,14 @@ else:
     )
 
 
-# Reglas reales por simbolo
+# ============================================================
+# REGLAS DE CANTIDAD
+#
+# IMPORTANTE:
+# WS API DE USD-M FUTURES NO EXPONE exchangeInfo.
+#
+# No se realiza ninguna llamada REST.
+# ============================================================
 
 symbol_rules = {}
 
@@ -168,7 +170,7 @@ for symbol in SYMBOLS:
 
 
 # ============================================================
-# POSICIONES PAPER
+# POSICIONES
 # ============================================================
 
 positions = {}
@@ -197,37 +199,6 @@ def log(message):
 
 
 # ============================================================
-# IP PUBLICA
-# ============================================================
-
-def log_public_ip():
-
-    try:
-
-        import requests
-
-        response = requests.get(
-            "https://api.ipify.org?format=json",
-            timeout=10
-        )
-
-        ip = response.json().get(
-            "ip",
-            "desconocida"
-        )
-
-        log(
-            f"IP PUBLICA DE SALIDA: {ip}"
-        )
-
-    except Exception as e:
-
-        log(
-            f"No se pudo obtener IP publica: {e}"
-        )
-
-
-# ============================================================
 # ATR
 # ============================================================
 
@@ -237,9 +208,7 @@ def calculate_atr(
 ):
 
     high = df["high"]
-
     low = df["low"]
-
     close = df["close"]
 
     previous_close = close.shift(1)
@@ -369,7 +338,6 @@ def calculate_signal(symbol):
     )
 
     last = df.iloc[-1]
-
     previous = df.iloc[-2]
 
     close = float(
@@ -420,53 +388,41 @@ def calculate_signal(symbol):
     long_score = 0
 
     if ema9 > ema21:
-
         long_score += 1
 
     if ema21 > ema50:
-
         long_score += 1
 
     if close > ema9:
-
         long_score += 1
 
     if 50 < rsi < 72:
-
         long_score += 1
 
     if volume > volume_ma:
-
         long_score += 1
 
     if close > previous_close:
-
         long_score += 1
 
     short_score = 0
 
     if ema9 < ema21:
-
         short_score += 1
 
     if ema21 < ema50:
-
         short_score += 1
 
     if close < ema9:
-
         short_score += 1
 
     if 28 < rsi < 50:
-
         short_score += 1
 
     if volume > volume_ma:
-
         short_score += 1
 
     if close < previous_close:
-
         short_score += 1
 
     signal = None
@@ -498,32 +454,17 @@ def calculate_signal(symbol):
 
 
 # ============================================================
-# RIESGO / BINANCE WS API
+# WS API
 # ============================================================
 
-#
-# IMPORTANTE:
-#
-# - NO USA REST DE BINANCE.
-#
-# - USA LA MISMA WS API ORIGINAL:
-#
-# wss://ws-fapi.binance.com/ws-fapi/v1
-#
-# - Las órdenes reales se envían por esa misma conexión WS API.
-#
-# ============================================================
+user_stream_control = None
 
-symbol_rules = {}
+user_stream_control_lock = threading.Lock()
+
+listen_key = None
 
 
 def _ws_signature(params):
-
-    """
-    Firma Binance WebSocket API:
-    orden alfabético de parámetros,
-    query string y HMAC SHA256.
-    """
 
     if not API_SECRET:
 
@@ -551,14 +492,6 @@ def ws_api_request(
     signed=True,
     timeout=15
 ):
-
-    """
-    Envía una petición por la MISMA conexión WS API usada
-    para crear el User Data Stream.
-
-    El lock evita que keepalive y órdenes hagan send/recv
-    simultáneamente sobre el mismo socket.
-    """
 
     global user_stream_control
 
@@ -622,9 +555,6 @@ def ws_api_request(
                 raw
             )
 
-            # La WS API devuelve una respuesta por petición.
-            # Si llega algo que no corresponde, seguimos esperando.
-
             if response.get(
                 "id"
             ) == request["id"]:
@@ -644,13 +574,17 @@ def ws_api_request(
     )
 
 
+# ============================================================
+# REGLAS
+# ============================================================
+
 def load_symbol_rules_ws():
 
     """
-    Carga reglas de símbolos.
+    NO llama exchangeInfo.
+    NO usa REST.
 
-    WS API Futures no expone exchangeInfo.
-    Usa valores compatibles por defecto.
+    Valores base conservadores.
     """
 
     global symbol_rules
@@ -672,6 +606,10 @@ def load_symbol_rules_ws():
         f"simbolos={len(symbol_rules)}"
     )
 
+
+# ============================================================
+# BALANCE
+# ============================================================
 
 def get_usdt_balance():
 
@@ -702,6 +640,10 @@ def get_usdt_balance():
     return 0.0
 
 
+# ============================================================
+# CANTIDAD
+# ============================================================
+
 def normalize_quantity(
     symbol,
     quantity,
@@ -717,9 +659,7 @@ def normalize_quantity(
         return 0.0
 
     step = rule["step"]
-
     min_qty = rule["min_qty"]
-
     min_notional = rule["min_notional"]
 
     if step <= 0:
@@ -746,19 +686,28 @@ def normalize_quantity(
             * step
         )
 
-    # Evita errores de representación flotante.
+    if step < 1:
 
-    decimals = max(
-        0,
-        int(
-            round(
-                -math.log10(step)
+        decimals = max(
+            0,
+            int(
+                round(
+                    -math.log10(step)
+                )
             )
         )
-    ) if step < 1 else 0
+
+    else:
+
+        decimals = 0
+
+    decimals = min(
+        decimals,
+        12
+    )
 
     return float(
-        f"{quantity:.{min(decimals, 12)}f}"
+        f"{quantity:.{decimals}f}"
     )
 
 
@@ -796,18 +745,15 @@ def calculate_position_size(
     )
 
 
+# ============================================================
+# STOP REAL
+# ============================================================
+
 def place_exchange_stop(
     symbol,
     side,
     stop_price
 ):
-
-    """
-    STOP_MARKET real por la misma WS API.
-
-    En USDⓈ-M actual, los conditional orders se envían
-    mediante algoOrder.place.
-    """
 
     close_side = (
         "SELL"
@@ -893,7 +839,7 @@ def update_exchange_stop(
         )
     ):
 
-        return
+        return True
 
     if old_id:
 
@@ -910,39 +856,47 @@ def update_exchange_stop(
             stop
         )
 
+        result = result or {}
+
         position["stop_order_id"] = (
-            result or {}
-        ).get(
-            "algoId"
+            result.get(
+                "algoId"
+            )
         )
 
         position["exchange_stop_price"] = stop
 
         log(
-            f"{symbol} | STOP REAL colocado | "
+            f"{symbol} | "
+            f"STOP REAL colocado | "
             f"stop={stop:.8f} | "
             f"algoId={position['stop_order_id']}"
         )
 
+        return True
+
     except Exception as e:
 
         position["stop_order_id"] = None
+
+        position["exchange_stop_price"] = None
 
         log(
             f"{symbol} | "
             f"ERROR colocando STOP REAL: {e}"
         )
 
+        return False
+
+
+# ============================================================
+# ABRIR POSICION REAL
+# ============================================================
 
 def open_paper_position(
     symbol,
     side
 ):
-
-    """
-    Nombre conservado para no tocar la estructura original.
-    En LIVE_TRADING=True ejecuta una orden REAL.
-    """
 
     with state_lock:
 
@@ -1065,13 +1019,41 @@ def open_paper_position(
 
             positions[symbol] = position
 
-        update_exchange_stop(
+        stop_ok = update_exchange_stop(
             symbol,
             position
         )
 
+        if not stop_ok:
+
+            log(
+                f"{symbol} | "
+                f"PELIGRO: posición abierta sin STOP. "
+                f"Intentando cerrar inmediatamente."
+            )
+
+            try:
+
+                close_paper_position(
+                    symbol,
+                    avg_price,
+                    "STOP NO COLOCADO"
+                )
+
+            except Exception as close_error:
+
+                log(
+                    f"{symbol} | "
+                    f"FALLO CIERRE DE EMERGENCIA: "
+                    f"{close_error}"
+                )
+
+            return
+
         log(
-            f"LIVE OPEN | {symbol} | {side} | "
+            f"LIVE OPEN | "
+            f"{symbol} | "
+            f"{side} | "
             f"entry={avg_price:.6f} | "
             f"qty={executed_qty:.6f} | "
             f"risk={stop_distance:.6f}"
@@ -1085,16 +1067,15 @@ def open_paper_position(
         )
 
 
+# ============================================================
+# CERRAR POSICION REAL
+# ============================================================
+
 def close_paper_position(
     symbol,
     price,
     reason
 ):
-
-    """
-    Nombre conservado para no tocar la estructura original.
-    En LIVE_TRADING=True cierra la posición REAL.
-    """
 
     with state_lock:
 
@@ -1206,7 +1187,9 @@ def close_paper_position(
             )
 
         log(
-            f"LIVE CLOSE | {symbol} | {side} | "
+            f"LIVE CLOSE | "
+            f"{symbol} | "
+            f"{side} | "
             f"entry={entry:.6f} | "
             f"exit={exit_price:.6f} | "
             f"PnL={pnl:+.4f} USDT | "
@@ -1261,10 +1244,6 @@ def manage_position(symbol):
 
         return
 
-    # --------------------------------------------------------
-    # ACTUALIZAR MAXIMO / MINIMO
-    # --------------------------------------------------------
-
     with state_lock:
 
         position["bars"] += 1
@@ -1298,10 +1277,6 @@ def manage_position(symbol):
             mfe
         )
 
-    # --------------------------------------------------------
-    # PROTECCION PROGRESIVA
-    # --------------------------------------------------------
-
     new_stop = position["stop"]
 
     for trigger_r, protect_r in PROTECTION_LEVELS:
@@ -1330,10 +1305,6 @@ def manage_position(symbol):
 
                     new_stop = candidate
 
-    # --------------------------------------------------------
-    # TRAILING
-    # --------------------------------------------------------
-
     for trigger_r, gap_r in TRAILING_LEVELS:
 
         if mfe >= trigger_r:
@@ -1360,10 +1331,6 @@ def manage_position(symbol):
 
                     new_stop = candidate
 
-    # --------------------------------------------------------
-    # EL STOP JAMAS SE AFLOJA
-    # --------------------------------------------------------
-
     old_stop = position["stop"]
 
     with state_lock:
@@ -1388,9 +1355,6 @@ def manage_position(symbol):
 
         mfe_r = position["mfe_r"]
 
-    # Si el stop protegido avanzó,
-    # mover también el STOP REAL.
-
     if abs(
         stop - old_stop
     ) > max(
@@ -1402,10 +1366,6 @@ def manage_position(symbol):
             symbol,
             position
         )
-
-    # --------------------------------------------------------
-    # STOP
-    # --------------------------------------------------------
 
     if (
         side == "LONG"
@@ -1432,10 +1392,6 @@ def manage_position(symbol):
         )
 
         return
-
-    # --------------------------------------------------------
-    # TIME STOP
-    # --------------------------------------------------------
 
     if (
         bars >= TIME_STOP_CANDLES
@@ -1511,10 +1467,6 @@ def process_candle(symbol):
             positions
         )
 
-    # --------------------------------------------------------
-    # SI YA ESTA ABIERTA
-    # --------------------------------------------------------
-
     if existing is not None:
 
         if existing["side"] != signal:
@@ -1530,10 +1482,6 @@ def process_candle(symbol):
                 )
 
         return
-
-    # --------------------------------------------------------
-    # MAX 4
-    # --------------------------------------------------------
 
     if total_positions >= MAX_POSITIONS:
 
@@ -1561,9 +1509,6 @@ def on_market_message(
             message
         )
 
-        # Igual que ONG:
-        # admite mensaje directo y combined.
-
         data = data.get(
             "data",
             data
@@ -1584,10 +1529,6 @@ def on_market_message(
         with state_lock:
 
             market_data[symbol]["price"] = price
-
-        # ----------------------------------------------------
-        # SOLO VELA CERRADA
-        # ----------------------------------------------------
 
         if not kline["x"]:
 
@@ -1691,21 +1632,6 @@ def make_market_close(symbol):
 # MARKET WEBSOCKET
 # ============================================================
 
-#
-# ESTA PARTE SIGUE EL PATRON DEL ONG:
-#
-# while True
-#
-# WebSocketApp
-#
-# run_forever(ping_interval=60, ping_timeout=20)
-#
-# log reconexion
-#
-# sleep(60)
-#
-# ============================================================
-
 def market_websocket_loop(symbol):
 
     market_ws = (
@@ -1747,8 +1673,6 @@ def market_websocket_loop(symbol):
                 ),
             )
 
-            # EXACTAMENTE EL PATRON DEL ONG
-
             ws.run_forever(
                 ping_interval=60,
                 ping_timeout=20
@@ -1761,13 +1685,10 @@ def market_websocket_loop(symbol):
                 f"Market WS exception: {e}"
             )
 
-        # ----------------------------------------------------
-        # RECONEXION CADA 60 SEGUNDOS
-        # ----------------------------------------------------
-
         log(
             f"{symbol} | "
-            f"Reconexión Market WS en 60 segundos..."
+            f"Reconexión Market WS en "
+            f"{RECONNECT_SECONDS} segundos..."
         )
 
         time.sleep(
@@ -1778,13 +1699,6 @@ def market_websocket_loop(symbol):
 # ============================================================
 # USER DATA STREAM
 # ============================================================
-
-user_stream_control = None
-
-user_stream_control_lock = threading.Lock()
-
-listen_key = None
-
 
 def start_user_data_stream():
 
@@ -1896,6 +1810,10 @@ def on_user_close(
         f"User WS cerrado: {code} {msg}"
     )
 
+
+# ============================================================
+# SINCRONIZACION DE POSICIONES
+# ============================================================
 
 def sync_account_positions(data):
 
@@ -2057,6 +1975,10 @@ def sync_account_positions(data):
         )
 
 
+# ============================================================
+# USER DATA MESSAGE
+# ============================================================
+
 def on_user_message(
     ws,
     message
@@ -2105,13 +2027,6 @@ def on_user_message(
 # USER DATA WEBSOCKET
 # ============================================================
 
-#
-# MISMO PATRON DEL ONG
-#
-# REINTENTO CADA 60 SEGUNDOS
-#
-# ============================================================
-
 def user_websocket_loop():
 
     global listen_key
@@ -2125,15 +2040,7 @@ def user_websocket_loop():
 
             key = start_user_data_stream()
 
-            try:
-
-                load_symbol_rules_ws()
-
-            except Exception as e:
-
-                log(
-                    f"REGLAS BINANCE WS: {e}"
-                )
+            load_symbol_rules_ws()
 
             ws_url = (
                 "wss://fstream.binance.com/private/ws?"
@@ -2167,8 +2074,6 @@ def user_websocket_loop():
                 on_close=on_user_close,
             )
 
-            # EXACTAMENTE COMO ONG
-
             stream_ws.run_forever(
                 ping_interval=60,
                 ping_timeout=20
@@ -2188,7 +2093,7 @@ def user_websocket_loop():
 
                     stream_ws.close()
 
-            except:
+            except Exception:
 
                 pass
 
@@ -2200,18 +2105,15 @@ def user_websocket_loop():
 
                     user_stream_control.close()
 
-            except:
+            except Exception:
 
                 pass
 
             user_stream_control = None
 
-        # ----------------------------------------------------
-        # RECONEXION CADA 60 SEGUNDOS
-        # ----------------------------------------------------
-
         log(
-            "Reconexión User Data en 60 segundos..."
+            "Reconexión User Data en "
+            f"{RECONNECT_SECONDS} segundos..."
         )
 
         time.sleep(
@@ -2229,9 +2131,6 @@ def user_stream_keepalive_loop():
     global listen_key
 
     while True:
-
-        # Igual que ONG:
-        # mantener vivo el User Data Stream.
 
         time.sleep(
             45 * 60
@@ -2275,9 +2174,17 @@ def user_stream_keepalive_loop():
                     15
                 )
 
-                response = json.loads(
-                    ws.recv()
-                )
+                while True:
+
+                    response = json.loads(
+                        ws.recv()
+                    )
+
+                    if response.get(
+                        "id"
+                    ) == request_id:
+
+                        break
 
             if response.get(
                 "status"
@@ -2318,7 +2225,7 @@ def user_stream_keepalive_loop():
 
                         user_stream_control.close()
 
-                except:
+                except Exception:
 
                     pass
 
@@ -2335,9 +2242,11 @@ def position_manager_loop():
 
         try:
 
-            symbols = list(
-                positions.keys()
-            )
+            with state_lock:
+
+                symbols = list(
+                    positions.keys()
+                )
 
             for symbol in symbols:
 
@@ -2521,11 +2430,15 @@ def main():
     )
 
     log(
-        "SIN REST DE BINANCE | ORDENES REALES POR WS API"
+        "SIN REST DE BINANCE"
     )
 
     log(
-        "RECONEXION WS = 60 SEGUNDOS"
+        "ORDENES REALES POR WS API"
+    )
+
+    log(
+        f"RECONEXION WS = {RECONNECT_SECONDS} SEGUNDOS"
     )
 
     log(
@@ -2535,12 +2448,6 @@ def main():
     log(
         "=========================================="
     )
-
-    log_public_ip()
-
-    # --------------------------------------------------------
-    # CREDENCIALES
-    # --------------------------------------------------------
 
     if not API_KEY or not API_SECRET:
 
@@ -2552,27 +2459,10 @@ def main():
 
         return
 
-    # --------------------------------------------------------
-    # HEALTH
-    # --------------------------------------------------------
-
     threading.Thread(
         target=health_server,
         daemon=True
     ).start()
-
-    # --------------------------------------------------------
-    # MARKET WEBSOCKETS
-    # --------------------------------------------------------
-    #
-    # Un WS por símbolo.
-    #
-    # Cada uno:
-    # ping_interval=60
-    # ping_timeout=20
-    # reconexion=60 segundos
-    #
-    # --------------------------------------------------------
 
     for symbol in SYMBOLS:
 
@@ -2586,10 +2476,6 @@ def main():
             0.10
         )
 
-    # --------------------------------------------------------
-    # USER DATA
-    # --------------------------------------------------------
-
     threading.Thread(
         target=user_websocket_loop,
         daemon=True
@@ -2600,18 +2486,10 @@ def main():
         daemon=True
     ).start()
 
-    # --------------------------------------------------------
-    # POSITION MANAGER
-    # --------------------------------------------------------
-
     threading.Thread(
         target=position_manager_loop,
         daemon=True
     ).start()
-
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
 
     threading.Thread(
         target=status_loop,
@@ -2625,10 +2503,6 @@ def main():
     log(
         "Esperando datos de mercado..."
     )
-
-    # --------------------------------------------------------
-    # MAIN LOOP
-    # --------------------------------------------------------
 
     while True:
 
@@ -2658,9 +2532,6 @@ if __name__ == "__main__":
         log(
             f"FATAL ERROR: {e}"
         )
-
-        # No cerrar inmediatamente.
-        # Deja visible el error en Railway.
 
         while True:
 
