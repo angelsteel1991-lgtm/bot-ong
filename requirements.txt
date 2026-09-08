@@ -1,6 +1,3 @@
-fastapi
-uvicorn
-websocket-client
-python-dotenv
 pandas
+websocket-client
 requests
