@@ -1,3 +1,7 @@
-requests>=2.31
+fastapi
+uvicorn
 pandas>=2.0
 websocket-client>=1.8
+requests>=2.31
+google-generativeai
+python-dotenv
