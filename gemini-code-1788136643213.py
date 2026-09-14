@@ -147,7 +147,7 @@ KUCOIN_PRICE_SCALE = {
 }
 
 
-KUCOIN_GRANULARITY = 300
+KUCOIN_GRANULARITY = 5  # minutos (API KuCoin espera granularity en minutos)
 
 
 # ============================================================
@@ -443,16 +443,21 @@ def load_kucoin_history(symbol):
     ]
 
     end_at = int(
-        time.time()
+        time.time() * 1000
+    )
+
+    window_minutes = (
+        (MIN_CANDLES + 20)
+        *
+        KUCOIN_GRANULARITY
     )
 
     start_at = (
         end_at
         -
         (
-            60
-            *
-            KUCOIN_GRANULARITY
+            window_minutes
+            * 60 * 1000
         )
     )
 
@@ -507,8 +512,13 @@ def load_kucoin_history(symbol):
 
         candles = []
 
-        now = int(
-            time.time()
+        now_ms = int(
+            time.time() * 1000
+        )
+
+        candle_duration_ms = (
+            KUCOIN_GRANULARITY
+            * 60 * 1000
         )
 
         for row in rows:
@@ -523,16 +533,16 @@ def load_kucoin_history(symbol):
             if (
                 timestamp
                 +
-                KUCOIN_GRANULARITY
+                candle_duration_ms
                 >
-                now
+                now_ms
             ):
                 continue
 
             candles.append({
 
                 "timestamp":
-                    timestamp * 1000,
+                    timestamp,
 
                 "open":
                     float(row[1])
